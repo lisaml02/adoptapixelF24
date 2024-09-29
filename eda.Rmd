@@ -1,0 +1,52 @@
+---
+title: "eda"
+output: html_document
+date: "2024-09-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading packages and data}
+library(tidyverse)
+library(dplyr)
+
+globe <- read_csv("./GLOBE_data.csv")
+
+lc <- read_csv("./GO_LandCover.csv")
+```
+
+# Cleaning
+
+```{r cleaning}
+globe <- globe %>% 
+  rename(landcover_id = `land covers:land cover id`) %>% 
+  rename(data_source = `land covers:data source`) %>% 
+  rename(measured_at = `land covers:measured at`) %>% 
+  rename(muc_code = `land covers:muc code`) %>% 
+  rename(muc_description = `land covers:muc description`) %>% 
+  rename(north_photo_url = `land covers:north photo url`) %>% 
+  rename(east_photo_url = `land covers:east photo url`) %>% 
+  rename(south_photo_url = `land covers:south photo url`) %>% 
+  rename(west_photo_url = `land covers:west photo url`) %>% 
+  rename(upward_photo_url = `land covers:upward photo url`) %>%
+  rename(downward_photo_url = `land covers:downward photo url`) %>%
+  rename(measure_lat = `land covers:measurement latitude`) %>% 
+  rename(measure_long = `land covers:measurement longitude`) %>% 
+  rename(measure_elev = `land covers:measurement elevation`) %>% 
+  rename(loc_method = `land covers:location method`) %>% 
+  rename(loc_accuracy = `land covers:location accuracy (m)`)
+```
+
+```{r}
+globe_c <- globe %>% 
+  select(organization_id, org_name, site_id, site_name, latitude, longitude, elevation, measured_on, landcover_id, data_source, measured_at, muc_code, muc_description, north_photo_url, east_photo_url, south_photo_url, west_photo_url, upward_photo_url, downward_photo_url, measure_lat, measure_long, measure_elev, loc_method, loc_accuracy) %>% 
+  filter(if_all(everything(), ~ !is.na(.)))
+
+globe_c
+```
+
+# Descriptive Statistics
+
+# Outlier Analysis
