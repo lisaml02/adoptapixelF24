@@ -1,0 +1,192 @@
+---
+title: "image_collage"
+output: html_document
+date: "2024-10-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r importing data and packages}
+library(tidyverse)
+library(dplyr)
+
+globe_c <- read_csv("./globe_cv2.csv")
+```
+
+```{r}
+
+# Define the URL columns in your dataframe
+urls <- c("north_photo_url", "east_photo_url", "south_photo_url", 
+          "west_photo_url", "upward_photo_url", "downward_photo_url")
+
+
+# Remove rows where any URL column contains the word "rejected"
+globe_c <- globe_c[!apply(globe_c[urls], 1, function(row) any(grepl("rejected", row, ignore.case = TRUE))), ]
+
+# Ensure URL columns are characters and trimmed
+globe_c[urls] <- lapply(globe_c[urls], as.character)
+globe_c[urls] <- lapply(globe_c[urls], trimws)
+
+get_image_info <- function(url) {
+  # Ensure URL is not empty or malformed
+  if (is.na(url) || url == "" || !grepl("^https?://", url)) {
+    print(paste("Skipping invalid URL:", url))
+    return(NULL)
+  }
+  
+  tryCatch({
+    print(paste("Processing URL:", url))  # Debugging statement
+    response <- GET(url)
+    
+    # Check if the response status is successful
+    if (status_code(response) == 200) {
+      img <- image_read(content(response, "raw"))
+      size_mb <- length(content(response, "raw")) / (1024 * 1024)
+      info <- image_info(img)
+      width <- info$width
+      height <- info$height
+      return(data.frame(url = url, size_mb = size_mb, width = width, height = height))
+    } else {
+      print(paste("Failed to fetch image. Status code:", status_code(response)))  # Debugging statement
+      return(NULL)
+    }
+  }, error = function(e) {
+    print(paste("Error processing URL:", url, "Error:", e))  # Debugging statement
+    return(NULL)
+  })
+}
+
+```
+
+```{r}
+library(httr)
+library(magick)
+
+# Function to apply get_image_info to each URL column in a row
+process_row <- function(row) {
+  result_list <- lapply(row[urls], get_image_info)
+  result_df <- do.call(rbind, result_list)
+  return(result_df)
+}
+
+# Apply to a subset of rows in the dataframe (using the first 500 rows as an example)
+image_info_list <- lapply(1:500, function(i) process_row(globe_c[i, ]))
+
+# Remove NULL elements from the list
+image_info_list <- Filter(Negate(is.null), image_info_list)
+
+# Combine into a single dataframe
+image_info_df <- do.call(rbind, image_info_list)
+
+```
+
+```{r}
+# Check the resulting dataframe
+print(image_info_df)
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(image_info_df, aes(x = width * height, y = size_mb)) +
+  geom_point() +
+  labs(x = "Resolution (width x height)", y = "Size (MB)", title = "Image Size vs. Resolution")
+
+```
+
+```{r}
+library(magick)
+
+# Gather URLs from image_info_df (use all rows)
+urls_to_process <- image_info_df$url
+
+# Function to download and resize image
+download_and_resize <- function(url, size = "255x255") {
+  tryCatch({
+    img <- image_read(url)
+    img_resized <- image_resize(img, size)
+    return(img_resized)
+  }, error = function(e) {
+    print(paste("Error processing URL:", url, "Error:", e))
+    return(NULL)
+  })
+}
+
+# Download and resize images to 255x255
+images_resized <- lapply(urls_to_process, download_and_resize, size = "255x255")
+images_resized <- Filter(Negate(is.null), images_resized)  # Remove any NULLs from failed downloads
+
+# Print the number of successfully processed images
+print(paste("Number of successfully processed images:", length(images_resized)))
+
+# Create a collage without borders
+if (length(images_resized) > 0) {
+  # Ensure images are arranged in rows for the collage
+  rows <- split(images_resized, ceiling(seq_along(images_resized) / 10))  # Adjust to set the number of images per row
+  
+  # Create a montage row by row, then stack them vertically
+  collage_rows <- lapply(rows, function(row) image_append(do.call(c, row), stack = FALSE))
+  collage_255 <- image_append(do.call(c, collage_rows), stack = TRUE)
+  
+  # Save the final collage
+  image_write(collage_255, path = "collage_255_no_border.jpg", format = "jpg")
+}
+
+```
+
+```{r}
+library(magick)
+
+# Gather URLs from image_info_df (use all rows)
+urls_to_process <- image_info_df$url
+
+# Function to download and resize image
+download_and_resize <- function(url, size = "64x64") {
+  tryCatch({
+    img <- image_read(url)
+    img_resized <- image_resize(img, size)
+    return(img_resized)
+  }, error = function(e) {
+    print(paste("Error processing URL:", url, "Error:", e))
+    return(NULL)
+  })
+}
+
+# Download and resize images to 64x64
+images_thumbnails <- lapply(urls_to_process, download_and_resize, size = "64x64")
+images_thumbnails <- Filter(Negate(is.null), images_thumbnails)  # Remove any NULLs from failed downloads
+
+# Print the number of successfully processed thumbnail images
+print(paste("Number of successfully processed thumbnail images:", length(images_thumbnails)))
+
+# Create a collage without borders using thumbnails
+if (length(images_thumbnails) > 0) {
+  # Ensure images are arranged in rows for the collage
+  rows <- split(images_thumbnails, ceiling(seq_along(images_thumbnails) / 20))  # Adjust to set the number of images per row
+  
+  # Create a montage row by row, then stack them vertically
+  collage_rows <- lapply(rows, function(row) image_append(do.call(c, row), stack = FALSE))
+  collage_thumbnails <- image_append(do.call(c, collage_rows), stack = TRUE)
+  
+  # Save the final thumbnail collage
+  image_write(collage_thumbnails, path = "collage_thumbnails_no_border.jpg", format = "jpg")
+}
+
+```
+
+# Notes
+
+for the photos: what is the megabite size vs the image resolution? calculate this and plot it along a timeline
+
+examine size more
+
+order by lat/long
+
+think about collaging these images into one image first –\> this emphasizes them
+
+can use small.jpg 255 x 255
+
+thumb.jpg is 64 x 64 –\> mosaic them into a 255 or 148 and then send that into a classifier
