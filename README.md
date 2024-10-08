@@ -167,6 +167,7 @@ Data was cleaned and processed in Rstudio
 Renamed columns to eliminate spaces
 selected exclusively, date, time, location, and sutface condition columns
 filtered out incomplete data
+Packages used: tidyverse, dplyr, ggplot2, magick, lubridate, httr
 
 
 ## Bias, Risks, and Limitations
