@@ -1,5 +1,5 @@
 language:
-- en
+-  en
 - es
 - et
 - gl
@@ -9,6 +9,19 @@ language:
 - pt
 - sl
 - uz
+- ca
+- de
+- fr
+- id
+- it
+- lg
+- ms
+- nl
+- 'no'
+- pl
+- rw
+- sr
+- sv
 tags:
 - climate
 - environment
