@@ -1,0 +1,717 @@
+---
+title: "clustering"
+output: html_document
+date: "2024-10-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Packages and Data
+
+```{r loading satellite data}
+library(readr)
+
+# Set the path to the folder containing the CSV files
+folder_path <- "lsatTS_export"
+
+# List all CSV files in the folder
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Initialize an empty list to store each chunk of data
+satellite_data_list <- list()
+
+# Loop through the CSV files and read them into the list
+for (i in 1:length(csv_files)) {
+  # Try to read the CSV file, handle errors gracefully
+  tryCatch({
+    satellite_data_list[[i]] <- read_csv(csv_files[i])
+  }, error = function(e) {
+    cat("Error in reading file:", csv_files[i], "\n")
+    cat("Skipping this file due to error:", e$message, "\n")
+  })
+}
+
+# Optionally, combine all chunks into a single dataframe if needed
+combined_satellite_data <- do.call(rbind, satellite_data_list)
+
+# Print to confirm the process
+print("All satellite data files that could be read have been loaded.")
+
+```
+
+```{r parsing out coords}
+library(jsonlite)  # For parsing the JSON format
+library(dplyr)
+library(stringr)  # For string manipulation
+
+# Function to extract latitude and longitude from the `.geo` column
+extract_coordinates <- function(geo_string) {
+  # Extract the coordinates part using regex
+  coords <- str_match(geo_string, '"coordinates":\\[([-0-9.]+),([-0-9.]+)\\]')
+  
+  # Return the longitude and latitude as numeric values
+  return(list(longitude = as.numeric(coords[2]), latitude = as.numeric(coords[3])))
+}
+
+# Apply the function to each row in the .geo column
+satellite_data_parsed <- combined_satellite_data %>%
+  rowwise() %>%
+  mutate(coords = list(extract_coordinates(.geo)),
+         longitude = coords$longitude,
+         latitude = coords$latitude) %>%
+  ungroup() %>%
+  select(-coords)  # Remove the intermediate coords column
+
+```
+
+```{r verifying proper parsing}
+head(satellite_data_parsed)
+```
+
+```{r merge data}
+library(sf)
+globe_c <- read_csv("globe_cv3.csv")
+
+globe_c_sf <- st_as_sf(globe_c, coords = c("longitude", "latitude"), crs = 4326)
+
+satellite_data_sf <- st_as_sf(satellite_data_parsed, coords = c("longitude", "latitude"), crs = 4326)
+
+# Perform spatial join with a tolerance for proximity (e.g., 0.001 degree ~ 100 meters)
+merged_data_sf <- st_join(globe_c_sf, satellite_data_sf, join = st_is_within_distance, dist = 0.001)
+
+# Check the result
+head(merged_data_sf)
+```
+
+# Clustering
+
+## K Means Clustering
+
+```{r extracting lat/long and getting data ready for clustering}
+# Extract latitude and longitude from the geometry column
+clustering_data <- merged_data_sf %>%
+  mutate(latitude = st_coordinates(.)[,2],  # Extract latitude
+         longitude = st_coordinates(.)[,1]) %>%
+  as.data.frame() %>%
+  select(-geometry)  # Remove the geometry column
+
+# Now 'clustering_data' contains latitude, longitude, and all other relevant columns
+```
+
+```{r k means clustering}
+# Select surface condition columns for clustering
+sf_cols <- c("snow_ice", "standing_water", "muddy", "dry_ground", "leaves_on_trees", "raining_snowing")
+
+# Prepare the dataset for clustering (surface condition columns)
+data_for_clustering <- clustering_data %>%
+  select(all_of(sf_cols)) %>%
+  na.omit()  # Ensure no NA values
+
+# Apply K-means clustering (or another algorithm)
+set.seed(123)  # For reproducibility
+k <- 3  # Choose the number of clusters
+kmeans_result <- kmeans(data_for_clustering, centers = k)
+
+# Add cluster labels back to the dataframe
+clustering_data$cluster <- kmeans_result$cluster
+
+# View the clustering result
+table(clustering_data$cluster)
+
+```
+
+```{r plotting clusters using PCA}
+library(ggplot2)
+# install.packages("FactoMineR")
+library(FactoMineR)  # For PCA
+# install.packages("factoextra")
+library(factoextra)  # For PCA visualization
+
+# Perform PCA on the surface condition columns
+pca_result <- PCA(data_for_clustering, graph = FALSE)
+
+# Create a dataframe for plotting, including PCA results and cluster labels
+plot_data <- data.frame(PC1 = pca_result$ind$coord[,1], 
+                        PC2 = pca_result$ind$coord[,2], 
+                        cluster = factor(clustering_data$cluster))
+
+# Plot the PCA results, coloring by cluster
+ggplot(plot_data, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point() +
+  labs(title = "PCA of Surface Conditions with Clusters", x = "PC1", y = "PC2") +
+  theme_minimal()
+
+```
+
+-   **Cluster Separation**:
+
+    -   The plot shows **some degree of separation** between clusters, but there is also a fair amount of **overlap** between them. This suggests that the clusters aren’t perfectly distinct in the reduced dimensions (PC1 and PC2), which is common for high-dimensional data being reduced to 2D.
+
+    -   **Red and blue clusters** seem to have the most overlap, indicating that they share some similarities in the features used for clustering (i.e., surface conditions). However, there are regions where the red and blue clusters are more separated.
+
+    -   The **green cluster** is more spread out and less densely packed, which could mean that the points in this cluster are more variable or that the features used in clustering did not separate them as well.
+
+-   **Variability**:
+
+    -   The PCA axes are showing the most variance in the data along the first two components (PC1 and PC2). Higher variance implies that the observations in that direction are more spread out. The plot suggests a moderate amount of variability along the x-axis (PC1) and slightly less along the y-axis (PC2).
+
+-   **Cluster 2 (green)** seems smaller and perhaps less cohesive than the others, meaning it may represent a smaller subgroup in your dataset, or the conditions that define it are not as distinct.
+
+-   **Overlap** between clusters may suggest that the features used for clustering (e.g., surface conditions like snow and leaves) may not have enough distinction to clearly separate the clusters based on these two components alone.
+
+```{r looking at cluster centers}
+print(kmeans_result$centers)
+```
+
+```{r summary stats by cluster}
+# Group the data by cluster and calculate the mean of each feature
+summary_by_cluster <- clustering_data %>%
+  group_by(cluster) %>%
+  summarise(across(c("snow_ice", "standing_water", "muddy", "dry_ground", "leaves_on_trees", "raining_snowing"), mean))
+
+# Print the summary
+print(summary_by_cluster)
+
+```
+
+```{r boxplots}
+# Create boxplots for each feature to see its distribution across clusters
+ggplot(clustering_data, aes(x = factor(cluster), y = snow_ice)) +
+  geom_boxplot() +
+  labs(title = "Snow Ice by Cluster", x = "Cluster", y = "Snow Ice")
+
+ggplot(clustering_data, aes(x = factor(cluster), y = standing_water)) +
+  geom_boxplot() +
+  labs(title = "Standing Water by Cluster", x = "Cluster", y = "Standing Water")
+
+ggplot(clustering_data, aes(x = factor(cluster), y = muddy)) +
+  geom_boxplot() +
+  labs(title = "Muddy by Cluster", x = "Cluster", y = "Muddy")
+  
+ggplot(clustering_data, aes(x = factor(cluster), y = dry_ground)) +
+  geom_boxplot() +
+  labs(title = "Dry Ground by Cluster", x = "Cluster", y = "Dry Ground")
+  
+ggplot(clustering_data, aes(x = factor(cluster), y = leaves_on_trees)) +
+  geom_boxplot() +
+  labs(title = "Leaves on Trees by Cluster", x = "Cluster", y = "Leaves on Trees")
+
+ggplot(clustering_data, aes(x = factor(cluster), y = raining_snowing)) +
+  geom_boxplot() +
+  labs(title = "Raining Snowing by Cluster", x = "Cluster", y = "Raining Snowing")
+```
+
+```{r using elbow method to select the best k}
+wcss <- vector()
+
+# Calculate WCSS for different values of k (e.g., from 1 to 10)
+for (k in 1:10) {
+  kmeans_result <- kmeans(data_for_clustering, centers = k)
+  wcss[k] <- sum(kmeans_result$tot.withinss)
+}
+
+# Plot the WCSS against k values
+plot(1:10, wcss, type = "b", pch = 19, frame = FALSE,
+     xlab = "Number of Clusters (k)", ylab = "Within-Cluster Sum of Squares",
+     main = "Elbow Method for Optimal k")
+
+```
+
+Best number of clusters = 8
+
+```{r k means clustering with k = 8}
+# Apply K-means clustering
+set.seed(123)  # For reproducibility
+k <- 8  # optimal k as determined by elbow method
+kmeans_result <- kmeans(data_for_clustering, centers = k)
+
+# Add cluster labels back to the dataframe
+clustering_data$cluster <- kmeans_result$cluster
+
+# View the clustering result
+table(clustering_data$cluster)
+
+```
+
+```{r PCA for k = 8}
+
+pca_result <- PCA(data_for_clustering, graph = FALSE)
+
+# Create a dataframe for plotting with PCA results and cluster labels
+plot_data_pca <- data.frame(
+  PC1 = pca_result$ind$coord[,1],  # First principal component
+  PC2 = pca_result$ind$coord[,2],  # Second principal component
+  cluster = factor(clustering_data$cluster)  # Cluster labels from K-means
+)
+library(ggplot2)
+
+# Plot the PCA results
+ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(title = "PCA Plot of Clusters", x = "Principal Component 1", y = "Principal Component 2") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(size = 3, alpha = 0.6) +
+  labs(title = "PCA Plot of Clusters", x = "PC1", y = "PC2") +
+  scale_color_manual(values = c("red", "blue", "green", "orange", "purple", "brown", "pink", "yellow")) +
+  theme_minimal()
+
+
+```
+
+#### 1. **Principal Components (PC1 and PC2)**:
+
+-   **PC1 (x-axis)** and **PC2 (y-axis)** are the first two principal components derived from the PCA analysis. These components are linear combinations of your original features (e.g., surface conditions like `snow_ice`, `leaves_on_trees`, etc.), and they capture the most variation in the dataset.
+
+-   **PC1** explains the most variance, and **PC2** explains the second most variance. Together, they provide a lower-dimensional projection of your higher-dimensional dataset.
+
+#### 2. **Clusters**:
+
+-   Each color represents a different cluster (from 1 to 8), as determined by your K-means clustering algorithm.
+
+-   The points within the same color (cluster) are grouped together because they share similar characteristics based on the surface conditions you used in clustering.
+
+#### 3. **Cluster Separation**:
+
+-   **Moderate Overlap**: You can see that the clusters are not completely separated. There's moderate overlap between several clusters (e.g., clusters 1, 4, and 3). This means that these clusters share some similarities in their surface condition features, and PCA has a hard time distinguishing them in 2D space.
+
+-   **Some Separation**: Certain clusters show a higher degree of separation, such as:
+
+    -   **Cluster 2 (blue)**: This cluster shows clearer separation from others, which indicates that the observations in this cluster are somewhat distinct in terms of their feature values.
+
+    -   **Cluster 8 (yellow)**: There’s some concentration of cluster 8 points in the lower-right region of the plot, indicating that the features in this cluster are somewhat different from those in other clusters.
+
+    -   **Cluster 6 (brown)**: Appears somewhat concentrated in specific regions of the plot, indicating that this cluster might also represent a distinct grouping in the data.
+
+#### 4. **Overlapping Clusters**:
+
+-   Clusters like **cluster 3 (green)** and **cluster 7 (pink)** seem to overlap with several other clusters, meaning the points in these clusters share feature characteristics with observations in other clusters. This could indicate that these clusters are less well-separated and more complex to distinguish.
+
+### Insights:
+
+-   The **overlap** between some clusters indicates that the surface condition features used in clustering might not fully separate all observations into distinct groups. You might want to explore other dimensions or features to get a better separation.
+
+-   **Cluster 2 (blue)** and **Cluster 8 (yellow)** show some better-defined separation, suggesting these clusters might represent more distinct environmental or surface conditio
+
+```{r scree plot}
+# Scree plot to show variance explained by each component
+fviz_screeplot(pca_result, addlabels = TRUE, ylim = c(0, 50))
+
+```
+
+```{r analyzing clusters for snow ice and leave on trees}
+# Group by cluster and summarize snow_ice and leaves_on_trees
+summary_by_cluster <- clustering_data %>%
+  group_by(cluster) %>%
+  summarise(
+    avg_snow_ice = mean(snow_ice),
+    avg_leaves_on_trees = mean(leaves_on_trees),
+    count = n()
+  )
+
+print(summary_by_cluster)
+
+```
+
+This will give you the average presence of snow (`snow_ice`) and leaves (`leaves_on_trees`) in each cluster. High values for `avg_snow_ice` in a cluster indicate that this cluster is strongly associated with the presence of snow. Similarly, high values for `avg_leaves_on_trees` indicate clusters that are strongly associated with leaves on trees.
+
+```{r visualize clusters}
+# Boxplot for snow presence across clusters
+ggplot(clustering_data, aes(x = factor(cluster), y = snow_ice, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Presence of Snow by Cluster", x = "Cluster", y = "Snow Presence") +
+  theme_minimal()
+
+# Boxplot for leaves on trees across clusters
+ggplot(clustering_data, aes(x = factor(cluster), y = leaves_on_trees, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Presence of Leaves on Trees by Cluster", x = "Cluster", y = "Leaves Presence") +
+  theme_minimal()
+
+```
+
+## Using Clusters for Prediction
+
+```{r add cluster labels as feature}
+# Perform K-means clustering and add cluster labels to the dataset
+set.seed(123)
+kmeans_result <- kmeans(data_for_clustering, centers = 8)
+clustering_data$cluster <- kmeans_result$cluster  # Add cluster labels
+
+```
+
+```{r splitting data}
+# install.packages("caret")
+library(caret)
+
+# Split data into training and testing sets (e.g., 80% training, 20% testing)
+set.seed(123)
+trainIndex <- createDataPartition(clustering_data$snow_ice, p = 0.8, list = FALSE)
+
+# Training and testing datasets
+train_data <- clustering_data[trainIndex, ]
+test_data <- clustering_data[-trainIndex, ]
+
+```
+
+```{r building a classifier for snow_ice}
+# Build a logistic regression model to predict snow_ice
+snow_model <- glm(snow_ice ~ cluster + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing, 
+                  data = train_data, family = "binomial")
+
+# Summary of the model
+summary(snow_model)
+
+```
+
+```{r evaluating snow model}
+# Predict on the test set
+pred_snow <- predict(snow_model, test_data, type = "response")
+
+# Convert probabilities to binary predictions (e.g., 0.5 as a threshold)
+pred_snow_class <- ifelse(pred_snow > 0.5, 1, 0)
+
+# Evaluate accuracy
+confusionMatrix(as.factor(pred_snow_class), as.factor(test_data$snow_ice))
+```
+
+```{r building classifier for leaves on trees}
+# Build a logistic regression model to predict leaves_on_trees
+leaves_model <- glm(leaves_on_trees ~ cluster + snow_ice + standing_water + muddy + dry_ground + raining_snowing, 
+                    data = train_data, family = "binomial")
+
+# Summary of the model
+summary(leaves_model)
+
+```
+
+```{r evaluate leaves model}
+# Predict on the test set
+pred_leaves <- predict(leaves_model, test_data, type = "response")
+
+# Convert probabilities to binary predictions
+pred_leaves_class <- ifelse(pred_leaves > 0.5, 1, 0)
+
+# Evaluate accuracy
+confusionMatrix(as.factor(pred_leaves_class), as.factor(test_data$leaves_on_trees))
+
+```
+
+```{r RF model for snow_ice}
+library(randomForest)
+# Build a Random Forest model to predict snow_ice
+set.seed(123)
+snow_rf <- randomForest(as.factor(snow_ice) ~ cluster + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing,
+                        data = train_data, ntree = 100, importance = TRUE)
+
+# Print the model
+print(snow_rf)
+
+```
+
+```{r evaluating snow rf}
+# Predict snow presence on the test set
+pred_snow_rf <- predict(snow_rf, test_data)
+
+# Confusion matrix to evaluate performance
+confusionMatrix(pred_snow_rf, as.factor(test_data$snow_ice))
+
+```
+
+```{r plotting feature importance}
+# Plot variable importance
+varImpPlot(snow_rf)
+
+# Print the importance of each feature
+importance(snow_rf)
+
+```
+
+```{r rf on leaves on trees}
+# Build a Random Forest model to predict leaves_on_trees
+set.seed(123)
+leaves_rf <- randomForest(as.factor(leaves_on_trees) ~ cluster + snow_ice + standing_water + muddy + dry_ground + raining_snowing,
+                          data = train_data, ntree = 100, importance = TRUE)
+
+# Print the model
+print(leaves_rf)
+
+```
+
+```{r evaluating leaves on trees rf}
+# Predict leaves presence on the test set
+pred_leaves_rf <- predict(leaves_rf, test_data)
+
+# Confusion matrix to evaluate performance
+confusionMatrix(pred_leaves_rf, as.factor(test_data$leaves_on_trees))
+
+```
+
+```{r plotting feature importance for leaves rf}
+# Plot variable importance
+varImpPlot(leaves_rf)
+
+# Print the importance of each feature
+importance(leaves_rf)
+
+```
+
+### tuning RF models
+
+```{r hyperparam tuning}
+# Set up a grid for tuning hyperparameters
+tune_grid <- expand.grid(mtry = c(2, 3, 4))
+
+# Tune the random forest model using cross-validation
+set.seed(123)
+tune_rf <- train(as.factor(snow_ice) ~ cluster + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing,
+                 data = train_data,
+                 method = "rf",
+                 trControl = trainControl(method = "cv", number = 5),  # 5-fold cross-validation
+                 tuneGrid = tune_grid,
+                 ntree = 100)
+
+# Print the tuned model results
+print(tune_rf)
+
+# Best mtry value
+tune_rf$bestTune
+
+```
+
+```{r plotting tuning results}
+plot(tune_rf)
+# Plot actual vs predicted snow presence
+ggplot(test_data, aes(x = as.factor(snow_ice), fill = pred_snow_rf)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Actual vs Predicted Snow Presence", x = "Actual Snow Presence", fill = "Predicted")
+
+# Plot actual vs predicted leaves presence
+ggplot(test_data, aes(x = as.factor(leaves_on_trees), fill = pred_leaves_rf)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Actual vs Predicted Leaves Presence", x = "Actual Leaves Presence", fill = "Predicted")
+
+```
+
+```{r trying a higher number of trees with mtry = 3 for snow}
+# Build a final Random Forest model with mtry = 3 and a larger number of trees
+set.seed(123)
+final_snow_rf <- randomForest(as.factor(snow_ice) ~ cluster + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing,
+                              data = train_data, 
+                              ntree = 500,  # You can use 500 trees for more stability
+                              mtry = 3,     # Use the tuned value of mtry = 3
+                              importance = TRUE)
+
+# Print the model
+print(final_snow_rf)
+
+```
+
+```{r evaluating final model}
+# Predict snow presence on the test set
+pred_final_snow_rf <- predict(final_snow_rf, test_data)
+
+# Confusion matrix to evaluate performance
+confusionMatrix(pred_final_snow_rf, as.factor(test_data$snow_ice))
+
+```
+
+```{r checking snow rf feature importance again}
+# Plot variable importance
+varImpPlot(final_snow_rf)
+
+# Print the importance of each feature
+importance(final_snow_rf)
+
+```
+
+```{r leaves rf model with tuned hyperparams}
+# Build the final Random Forest model for leaves on trees
+set.seed(123)
+final_leaves_rf <- randomForest(as.factor(leaves_on_trees) ~ cluster + snow_ice + standing_water + muddy + dry_ground + raining_snowing,
+                                data = train_data, 
+                                ntree = 500, 
+                                mtry = 3, 
+                                importance = TRUE)
+
+# Predict leaves presence on the test set
+pred_final_leaves_rf <- predict(final_leaves_rf, test_data)
+
+# Confusion matrix to evaluate performance
+confusionMatrix(pred_final_leaves_rf, as.factor(test_data$leaves_on_trees))
+
+```
+
+```{r trying snow_ice with even more trees}
+# Build Random Forest model with more trees (e.g., ntree = 1000)
+set.seed(123)
+final_snow_rf_more_trees <- randomForest(as.factor(snow_ice) ~ cluster + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing,
+                                         data = train_data, 
+                                         ntree = 1000,  # Using 1000 trees
+                                         mtry = 3, 
+                                         importance = TRUE)
+
+# Evaluate the model with more trees
+pred_snow_more_trees <- predict(final_snow_rf_more_trees, test_data)
+confusionMatrix(pred_snow_more_trees, as.factor(test_data$snow_ice))
+
+```
+
+```{r checking for overfitting}
+# Evaluate on training data for snow_ice
+pred_train_snow <- predict(final_snow_rf, train_data)
+confusionMatrix(pred_train_snow, as.factor(train_data$snow_ice))
+
+# Evaluate on training data for leaves_on_trees
+pred_train_leaves <- predict(final_leaves_rf, train_data)
+confusionMatrix(pred_train_leaves, as.factor(train_data$leaves_on_trees))
+
+```
+
+training accuracy is barely higher for snow_ice and even slightly lower for leaves on trees, so we aren't overfitting
+
+## DBSCAN Clustering
+
+dataset involves environmental conditions, and clusters may not always be spherical or evenly distributed. DBSCAN’s ability to find clusters of arbitrary shapes and handle noise or outliers makes it a strong candidate. If you have areas where snow is present in dense regions or sporadically, DBSCAN can identify those clusters and flag outliers (e.g., areas with snow when they shouldn’t have it). other methods won't work well for the size and nature of the data.
+
+```{r installing and loading DBSCAN package}
+# install.packages("dbscan")
+library(dbscan)
+```
+
+```{r KNN distance plot}
+# Find k-nearest neighbor distances (for example, k = 4)
+kNNdistplot(data_for_clustering, k = 4)
+abline(h = 0.5, col = "red", lty = 2)  # This line is a visual aid, adjust it based on the plot
+
+```
+
+looks like it starts at around 0.5
+
+```{r apply DBSCAN}
+# Run DBSCAN using eps = 0.5 and minPts = 10
+dbscan_result <- dbscan(data_for_clustering, eps = 0.5, minPts = 10)
+
+# Add the DBSCAN cluster labels to the dataset
+clustering_data$cluster_dbscan <- dbscan_result$cluster
+
+# Check the number of points in each cluster
+print(table(clustering_data$cluster_dbscan))  # Check distribution of clusters
+
+```
+
+```{r visualize clusters}
+# Visualize DBSCAN clusters using PCA
+pca_result <- PCA(data_for_clustering, graph = FALSE)
+
+plot_data_pca <- data.frame(
+  PC1 = pca_result$ind$coord[,1], 
+  PC2 = pca_result$ind$coord[,2], 
+  cluster_dbscan = factor(clustering_data$cluster_dbscan)
+)
+
+# Plot the PCA result with DBSCAN clusters
+ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = cluster_dbscan)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(title = "DBSCAN Clusters with PCA", x = "Principal Component 1", y = "Principal Component 2") +
+  theme_minimal()
+
+```
+
+```{r fixing and splitting}
+# Add the DBSCAN cluster labels to the full dataset
+clustering_data$cluster_dbscan <- dbscan_result$cluster
+
+# Split the full dataset into training and testing sets, including the cluster_dbscan column
+set.seed(123)
+trainIndex <- createDataPartition(clustering_data$snow_ice, p = 0.8, list = FALSE)
+
+# Training and testing datasets
+train_data <- clustering_data[trainIndex, ]
+test_data <- clustering_data[-trainIndex, ]
+```
+
+```{r}
+# Build the Random Forest model using DBSCAN clusters to predict snow_ice
+set.seed(123)
+rf_dbscan <- randomForest(as.factor(snow_ice) ~ cluster_dbscan + standing_water + muddy + dry_ground + leaves_on_trees + raining_snowing,
+                          data = train_data, ntree = 500, importance = TRUE)
+
+# Print the model
+print(rf_dbscan)
+
+```
+
+```{r evaluate snow ice performance again}
+# Predict on the test set
+pred_rf_dbscan <- predict(rf_dbscan, test_data)
+
+# Confusion matrix to evaluate performance
+confusionMatrix(pred_rf_dbscan, as.factor(test_data$snow_ice))
+
+```
+
+```{r DBSCAN leaves on trees RF}
+# Build a Random Forest model using DBSCAN clusters to predict leaves_on_trees
+set.seed(123)
+rf_dbscan_leaves <- randomForest(as.factor(leaves_on_trees) ~ cluster_dbscan + snow_ice + standing_water + muddy + dry_ground + raining_snowing,
+                                 data = train_data, ntree = 500, importance = TRUE)
+
+# Print the model to inspect its structure
+print(rf_dbscan_leaves)
+
+```
+
+```{r evaluate performance of leaves DBSCAN RF model}
+# Predict leaves_on_trees on the test set
+pred_rf_dbscan_leaves <- predict(rf_dbscan_leaves, test_data)
+
+# Confusion matrix to evaluate the performance of the model
+confusionMatrix(pred_rf_dbscan_leaves, as.factor(test_data$leaves_on_trees))
+
+```
+
+```{r checking for overfitting again}
+# Predict leaves_on_trees on the training set
+pred_train_leaves <- predict(rf_dbscan_leaves, train_data)
+
+# Confusion matrix to evaluate performance on the training set
+confusionMatrix(pred_train_leaves, as.factor(train_data$leaves_on_trees))
+
+# Predict snow_ice on the training set
+pred_train_snow <- predict(rf_dbscan, train_data)
+
+# Confusion matrix to evaluate performance on the training set
+confusionMatrix(pred_train_snow, as.factor(train_data$snow_ice))
+
+```
+
+## Plotting Feature Importance
+
+```{r plotting deaturing importance again}
+# Plot variable importance for leaves_on_trees prediction model
+varImpPlot(rf_dbscan_leaves)
+
+# Check feature importance scores for leaves_on_trees prediction model
+importance(rf_dbscan_leaves)
+
+```
+
+-   **MeanDecreaseAccuracy**: Measures the decrease in accuracy when the feature is excluded. The higher the value, the more important the feature is.
+
+-   **MeanDecreaseGini**: Measures the contribution of the feature to reducing the Gini impurity in the trees. The higher the value, the more important the feature.
+
+```{r}
+# Plot variable importance for snow_ice prediction model
+varImpPlot(rf_dbscan)
+
+# Check feature importance scores for snow_ice prediction model
+importance(rf_dbscan)
+
+```
+
+Pay special attention to the **`cluster_dbscan`** feature. If it has a high importance score, this indicates that the DBSCAN clusters significantly contribute to the model's predictions.

@@ -1,0 +1,505 @@
+---
+title: "data_reclean"
+output: html_document
+date: "2024-10-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+```
+
+```{r loading filtered globe data}
+globe_c <- read_csv("globe_cv2.csv")
+```
+
+```{r}
+sf_cols <- c("snow_ice", "standing_water", "muddy", "dry_ground", "leaves_on_trees", "raining_snowing")
+# Use globe_c instead of df
+non_zero_values <- globe_c[apply(globe_c[sf_cols], 1, function(row) any(row != 0)), ]
+
+# This will return the rows where any of the surface condition columns have non-zero values
+print(non_zero_values)
+
+
+```
+
+```{r loading original globe dataset}
+globe <- read_csv("GLOBE_data.csv")
+```
+
+```{r renaming cols and first round of cleaning}
+globe <- globe %>% 
+  rename(landcover_id = `land covers:land cover id`) %>% 
+  rename(data_source = `land covers:data source`) %>% 
+  rename(measured_at = `land covers:measured at`) %>% 
+  rename(muc_code = `land covers:muc code`) %>% 
+  rename(muc_description = `land covers:muc description`) %>% 
+  rename(north_photo_url = `land covers:north photo url`) %>% 
+  rename(east_photo_url = `land covers:east photo url`) %>% 
+  rename(south_photo_url = `land covers:south photo url`) %>% 
+  rename(west_photo_url = `land covers:west photo url`) %>% 
+  rename(upward_photo_url = `land covers:upward photo url`) %>%
+  rename(downward_photo_url = `land covers:downward photo url`) %>%
+  rename(measure_lat = `land covers:measurement latitude`) %>% 
+  rename(measure_long = `land covers:measurement longitude`) %>% 
+  rename(measure_elev = `land covers:measurement elevation`) %>% 
+  rename(loc_method = `land covers:location method`) %>% 
+  rename(loc_accuracy = `land covers:location accuracy (m)`) %>% 
+  rename(snow_ice = `land covers:snow ice`) %>% 
+  rename(standing_water = `land covers:standing water`) %>% 
+  rename(muddy = `land covers:muddy`) %>% 
+  rename(dry_ground = `land covers:dry ground`) %>% 
+  rename(leaves_on_trees = `land covers:leaves on trees`) %>% 
+  rename(raining_snowing = `land covers:raining snowing`)
+
+globe
+```
+
+```{r checking for non nas in the sf columns}
+sf_cols <- c("snow_ice", "standing_water", "muddy", "dry_ground", "leaves_on_trees", "raining_snowing")
+
+# Filter rows where none of the surface condition columns have NA values
+no_na_values <- globe[apply(globe[sf_cols], 1, function(row) all(!is.na(row))), ]
+
+# This will return rows where none of the specified surface condition columns have NA values
+print(no_na_values)
+
+```
+
+```{r refiltering}
+sf_cols <- c("snow_ice", "standing_water", "muddy", "dry_ground", "leaves_on_trees", "raining_snowing")
+photo_cols <- c("north_photo_url", "east_photo_url", "south_photo_url", "west_photo_url", "upward_photo_url", "downward_photo_url")
+
+globe_c <- globe %>%
+  select(
+    organization_id, org_name, site_id, site_name, latitude, longitude, elevation, measured_on, 
+    landcover_id, data_source, measured_at, north_photo_url, 
+    east_photo_url, south_photo_url, west_photo_url, upward_photo_url, downward_photo_url, 
+    measure_lat, measure_long, measure_elev, loc_method, loc_accuracy, snow_ice, standing_water, 
+    muddy, dry_ground, leaves_on_trees, raining_snowing
+  ) %>%
+  filter(across(c(sf_cols, photo_cols, "measure_lat", "measure_long"), ~ !is.na(.))) %>%  # Ensure no NAs in both sf_cols and photo_cols
+  mutate(across(all_of(sf_cols), ~ as.integer(.)))  # Convert booleans to binary (0, 1)
+
+# Check the updated dataframe
+print(globe_c)
+
+```
+
+```{r reformatting columns}
+globe_c$measured_on <- as.POSIXct(as.character(globe_c$measured_on), format = "%Y-%m-%d")
+
+globe_c <- globe_c %>%
+  mutate(
+    organization_id = as.numeric(organization_id),
+    site_id = as.numeric(site_id),
+    latitude = round(as.numeric(latitude), 6),
+    longitude = round(as.numeric(longitude), 6),
+    elevation = round(as.numeric(elevation), 6),
+    measure_lat = round(as.numeric(measure_lat), 6),
+    measure_long = round(as.numeric(measure_long), 6),
+    measure_elev = round(as.numeric(measure_elev), 6)
+  )
+globe_c
+```
+
+```{r checking for languages}
+# install.packages("cld2")
+library(cld2)
+
+# Check languages in the text_column of globe_c
+language_counts <- table(cld2::detect_language(globe_c$org_name, plain_text = TRUE))
+
+# Display the language counts
+print(language_counts)
+```
+
+```{r eda stuff}
+min(globe_c$measured_at)
+max(globe_c$measured_at)
+
+min(globe_c$latitude)
+min(globe_c$longitude)
+min(globe_c$measure_lat)
+min(globe_c$measure_long)
+
+max(globe_c$latitude)
+max(globe_c$longitude)
+max(globe_c$measure_lat)
+max(globe_c$measure_long)
+
+```
+
+```{r checking if measured_At = measured_on}
+# Step 1: Add the column to check if measured_at and measured_on are the same
+globe_c <- globe_c %>%
+  mutate(are_equal = measured_at == measured_on)
+
+# Step 2: Filter rows where measured_at and measured_on are equal
+globe_c_equal <- globe_c %>% filter(are_equal)
+
+# Step 3: Find the minimum and maximum dates where they are equal
+min_date <- format(min(globe_c_equal$measured_at, na.rm = TRUE), "%Y-%m-%d")
+max_date <- format(max(globe_c_equal$measured_at, na.rm = TRUE), "%Y-%m-%d")
+
+# Print the range of dates
+cat("Range of dates where measured_at and measured_on are equal (YYYY-MM-DD):\n")
+cat("  Minimum date: ", min_date, "\n")
+cat("  Maximum date: ", max_date, "\n")
+
+```
+
+```{r calculating local time}
+globe_c <- globe_c %>%
+  mutate(
+    # Calculate the time zone offset (round to the nearest hour)
+    timezone_offset = round(measure_long / 15),
+    
+    # Calculate the local time by adding the offset to measured_on
+    local_time = measured_on + hours(timezone_offset)
+  )
+
+globe_c
+```
+
+```{r converting location accuracy column into standardized units}
+# Convert loc_accuracy from meters to degrees of latitude and longitude
+globe_c <- globe_c %>%
+  mutate(
+    # Convert latitude offset: distance in meters divided by meters per degree of latitude
+    latitude_offset_deg = loc_accuracy / 111320,
+    
+    # Convert longitude offset: accounts for latitude's effect on longitude distance
+    longitude_offset_deg = loc_accuracy / (111320 * cos(measure_lat * pi / 180))
+  )
+
+globe_c
+```
+
+```{r}
+# Assuming globe_c is your dataframe
+site_id_counts <- globe_c %>%
+  group_by(site_id) %>%
+  summarise(count = n())
+
+# Find site IDs with exactly 10 observations
+site_ids_with_10_obs <- site_id_counts %>%
+  filter(count == 10)
+
+# Find site IDs with exactly 1 observation
+site_ids_with_1_obs <- site_id_counts %>%
+  filter(count == 1)
+
+# Display results
+site_ids_with_10_obs
+site_ids_with_1_obs
+
+```
+
+```{r aggregating lat and long}
+# Calculate the average of the latitude and longitude columns
+globe_aggregated <- globe_c %>%
+  summarise(
+    avg_latitude = mean(latitude, na.rm = TRUE),
+    avg_longitude = mean(longitude, na.rm = TRUE),
+    avg_measure_lat = mean(measure_lat, na.rm = TRUE),
+    avg_measure_long = mean(measure_long, na.rm = TRUE)
+  )
+
+# Display the results
+globe_aggregated
+```
+
+```{r aggregating by degree blocks}
+# Aggregate by degree blocks (round to the nearest whole number)
+globe_block_aggregated <- globe_c %>%
+  mutate(
+    lat_block = floor(latitude),          # Find the latitude degree block
+    long_block = floor(longitude),        # Find the longitude degree block
+    measure_lat_block = floor(measure_lat),  # Measured latitude block
+    measure_long_block = floor(measure_long) # Measured longitude block
+  ) %>%
+  group_by(lat_block, long_block) %>%  # Group by the original lat/long blocks
+  summarise(
+    avg_latitude = mean(latitude, na.rm = TRUE),
+    avg_longitude = mean(longitude, na.rm = TRUE),
+    avg_measure_lat = mean(measure_lat, na.rm = TRUE),
+    avg_measure_long = mean(measure_long, na.rm = TRUE),
+    count = n()  # Count of observations in each block
+  )
+
+# Display the results
+globe_block_aggregated
+
+
+library(dplyr)
+
+# Count unique latitude blocks and their frequencies
+lat_block_counts <- globe_block_aggregated %>%
+  count(lat_block, name = "frequency_lat_block")
+
+# Count unique longitude blocks and their frequencies
+long_block_counts <- globe_block_aggregated %>%
+  count(long_block, name = "frequency_long_block")
+
+# Display the total number of unique latitude and longitude blocks
+num_lat_blocks <- n_distinct(globe_block_aggregated$lat_block)
+num_long_blocks <- n_distinct(globe_block_aggregated$long_block)
+
+print(paste("Total unique latitude blocks:", num_lat_blocks))
+print(paste("Total unique longitude blocks:", num_long_blocks))
+
+# Display the frequency tables for latitude and longitude blocks
+lat_block_counts
+long_block_counts
+
+```
+
+```{r adding season column}
+library(lubridate)
+
+# Add the season column based on the local_time
+globe_c <- globe_c %>%
+  mutate(
+    # Extract the month and day for classification
+    month_day = format(local_time, "%m-%d"),
+    
+    # Determine the season based on the local_time date
+    season = case_when(
+      month_day >= "03-20" & month_day <= "06-20" ~ "Spring",
+      month_day >= "06-21" & month_day <= "09-22" ~ "Summer",
+      month_day >= "09-23" & month_day <= "12-20" ~ "Fall",
+      TRUE ~ "Winter"  # Remaining dates are considered Winter
+    )
+  )
+
+# View the updated dataset with the season column
+head(globe_c)
+
+```
+
+```{r day of year}
+# Add a column that represents the day of the year
+globe_c <- globe_c %>%
+  mutate(
+    day_of_year = yday(local_time)  # yday() accounts for leap years
+  )
+
+# View the updated dataset with the day_of_year column
+head(globe_c)
+```
+
+```{r lat outliers}
+library(dplyr)
+
+# Find rows where latitude or measured latitude falls outside the -90 to 90 range
+invalid_latitudes <- globe_c %>%
+  filter(latitude < -90 | latitude > 90 | measure_lat < -90 | measure_lat > 90)
+
+# Display the rows with invalid latitude values
+invalid_latitudes
+```
+
+```{r location outliers}
+# Function to identify outliers using the IQR method
+find_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_value <- IQR(x, na.rm = TRUE)
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  return(x < lower_bound | x > upper_bound)
+}
+
+# Apply outlier analysis to latitude and longitude columns
+globe_c_outliers <- globe_c %>%
+  mutate(
+    lat_outlier = find_outliers(latitude),
+    long_outlier = find_outliers(longitude),
+    measure_lat_outlier = find_outliers(measure_lat),
+    measure_long_outlier = find_outliers(measure_long)
+  )
+
+# Display rows where any of the latitude or longitude values are outliers
+globe_c_outliers %>%
+  filter(lat_outlier | long_outlier | measure_lat_outlier | measure_long_outlier)
+
+```
+
+```{r date outliers}
+# Function to identify outliers using the IQR method
+find_date_outliers <- function(day_of_year) {
+  Q1 <- quantile(day_of_year, 0.25, na.rm = TRUE)
+  Q3 <- quantile(day_of_year, 0.75, na.rm = TRUE)
+  IQR_value <- IQR(day_of_year, na.rm = TRUE)
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  return(day_of_year < lower_bound | day_of_year > upper_bound)
+}
+
+# Apply the outlier analysis to the day_of_year column
+globe_c <- globe_c %>%
+  mutate(
+    date_outlier = find_date_outliers(day_of_year)
+  )
+
+# Display rows where the date is considered an outlier
+date_outliers <- globe_c %>%
+  filter(date_outlier)
+
+# View the date outliers
+date_outliers
+
+```
+
+```{r loc accuracy outliers}
+# Calculate the IQR bounds for the loc_accuracy column
+loc_accuracy_stats <- globe_c %>%
+  summarise(
+    Q1 = quantile(loc_accuracy, 0.25, na.rm = TRUE),
+    Q3 = quantile(loc_accuracy, 0.75, na.rm = TRUE),
+    IQR_value = IQR(loc_accuracy, na.rm = TRUE)
+  )
+
+# Calculate the lower and upper bounds for outliers
+lower_bound <- loc_accuracy_stats$Q1 - 1.5 * loc_accuracy_stats$IQR_value
+upper_bound <- loc_accuracy_stats$Q3 + 1.5 * loc_accuracy_stats$IQR_value
+
+# Identify outliers in the loc_accuracy column
+globe_c <- globe_c %>%
+  mutate(
+    loc_accuracy_outlier = loc_accuracy < lower_bound | loc_accuracy > upper_bound
+  )
+
+# Display rows where loc_accuracy is an outlier
+loc_accuracy_outliers <- globe_c %>%
+  filter(loc_accuracy_outlier)
+
+# View the outliers
+loc_accuracy_outliers
+
+```
+
+```{r graphing lat/long}
+library(ggplot2)
+
+# Assuming 'globe_c' is your dataframe
+ggplot(globe_c) +
+  # Plot measured latitude and longitude
+  geom_point(aes(x = measure_long, y = measure_lat), color = 'blue', alpha = 0.6, size = 2) +
+  # Plot latitude and longitude
+  geom_point(aes(x = longitude, y = latitude), color = 'red', alpha = 0.6, size = 2, shape = 4) +
+  labs(
+    title = 'Latitude and Longitude Scatter Plot',
+    x = 'Longitude',
+    y = 'Latitude'
+  ) +
+  theme_minimal() +
+  scale_color_manual(
+    name = 'Coordinates',
+    values = c('blue' = 'Measured Coordinates', 'red' = 'Original Coordinates')
+  ) +
+  theme(legend.position = 'top')
+
+```
+
+```{r dist of time}
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+
+# Extract hour, month, and year from local_time
+globe_c <- globe_c %>%
+  mutate(
+    hour_of_day = hour(local_time),
+    month_of_year = month(local_time, label = TRUE, abbr = TRUE),  # Label with month names
+    year = year(local_time)
+  )
+
+# Plot 1: Distribution of Hour of the Day
+plot_hour <- ggplot(globe_c, aes(x = hour_of_day)) +
+  geom_histogram(binwidth = 1, fill = 'blue', color = 'black', alpha = 0.7) +
+  labs(
+    title = 'Distribution of Time (Hour of Day)',
+    x = 'Hour of Day',
+    y = 'Frequency'
+  ) +
+  theme_minimal()
+
+# Plot 2: Distribution of Month of the Year
+plot_month <- ggplot(globe_c, aes(x = month_of_year)) +
+  geom_bar(fill = 'green', color = 'black', alpha = 0.7) +
+  labs(
+    title = 'Distribution of Time (Month of Year)',
+    x = 'Month of Year',
+    y = 'Frequency'
+  ) +
+  theme_minimal()
+
+# Plot 3: Distribution of Years
+plot_year <- ggplot(globe_c, aes(x = year)) +
+  geom_bar(fill = 'purple', color = 'black', alpha = 0.7) +
+  labs(
+    title = 'Distribution of Time (Years)',
+    x = 'Year',
+    y = 'Frequency'
+  ) +
+  theme_minimal()
+
+# Display the plots
+plot_hour
+plot_month
+plot_year
+
+```
+
+```{r location accuracy distribution with outliers}
+library(ggplot2)
+
+# Boxplot for location accuracy
+ggplot(globe_c, aes(x = loc_accuracy)) +
+  geom_boxplot(fill = 'skyblue', color = 'black', outlier.colour = 'red', outlier.shape = 16, outlier.size = 2) +
+  labs(
+    title = 'Boxplot of Location Accuracy',
+    x = 'Location Accuracy (meters)'
+  ) +
+  theme_minimal()
+
+```
+
+```{r accuracy distribution without outliers}
+# Calculate the IQR bounds for loc_accuracy
+loc_accuracy_stats <- globe_c %>%
+  summarise(
+    Q1 = quantile(loc_accuracy, 0.25, na.rm = TRUE),
+    Q3 = quantile(loc_accuracy, 0.75, na.rm = TRUE),
+    IQR_value = IQR(loc_accuracy, na.rm = TRUE)
+  )
+
+# Calculate the lower and upper bounds for outliers
+lower_bound <- loc_accuracy_stats$Q1 - 1.5 * loc_accuracy_stats$IQR_value
+upper_bound <- loc_accuracy_stats$Q3 + 1.5 * loc_accuracy_stats$IQR_value
+
+# Remove outliers from the data
+globe_c_filtered <- globe_c %>%
+  filter(loc_accuracy >= lower_bound & loc_accuracy <= upper_bound)
+
+# Plot the boxplot without outliers
+ggplot(globe_c_filtered, aes(x = loc_accuracy)) +
+  geom_boxplot(fill = 'skyblue', color = 'black') +
+  labs(
+    title = 'Boxplot of Location Accuracy (Outliers Removed)',
+    x = 'Location Accuracy (meters)'
+  ) +
+  theme_minimal()
+
+```
+
+```{r read to new csv}
+write_csv(globe_c, "globe_cv3.csv")
+```

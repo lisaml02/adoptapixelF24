@@ -1,0 +1,237 @@
+---
+title: "time_series"
+output: html_document
+date: "2024-10-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Loading and Processing
+
+```{r loading packages}
+# install.packages("devtools")
+devtools::install_github("logan-berner/LandsatTS", build_vignettes = TRUE)
+reticulate::use_virtualenv("rgee", required = TRUE)
+
+# install.packages("rgee")
+library(rgee)
+# Recreate the Python environment with all dependencies
+ee_install()
+
+ee_check()
+
+ee_Initialize()
+```
+
+```{r}
+
+# Load packages for data handling etc.
+library(sf)
+library(dplyr)
+library(purrr)
+library(data.table)
+library(stringr)
+library(rgee)
+
+# Load LandsatTS package
+library(LandsatTS)
+
+# Intialize the Earth Engine with rgee
+ee_clean_user_credentials()
+ee_Authenticate()
+ee_Initialize(email = "lisamliubovich@gmail.com", drive = TRUE)
+```
+
+```{r loading globe data}
+library(tidyverse)
+globe_c <- read_csv("/Users/lisaliubovich/Desktop/grad_school/fall_2024/data-793/AoP/data:eda/globe_cv2.csv")
+```
+
+```{r subsetting the measured lat and long columns}
+library(sf)
+# Convert the coordinates (measured_lat, measured_long) to an sf object
+globe_sf <- globe_c %>%
+  st_as_sf(coords = c("measure_long", "measure_lat"), crs = 4326) %>%
+  mutate(sample_id = row_number())  # Assign a unique sample ID to each point
+
+# View the sf object
+print(globe_sf)
+```
+
+```{r}
+# Re-export the Landsat time-series data with fresh IDs
+# task_list <- lsat_export_ts(globe_sf)
+
+# Start the new tasks
+# lapply(task_list, function(task) ee$batch$Task$start(task))
+
+# Monitor the new tasks
+# map(task_list, ee_monitoring)
+
+```
+
+```{r converting into satellite data}
+# Load necessary libraries
+library(data.table)  # For fast reading and handling of large datasets
+library(dplyr)       # For data manipulation
+
+# Set the path to the folder containing your exported files
+export_folder <- "~/Desktop/grad_school/fall_2024/data-793/AoP/data:eda"
+
+# List all CSV files in the folder
+csv_files <- list.files(path = export_folder, pattern = "*.csv", full.names = TRUE)
+
+# Function to read each file and ensure all columns are converted to character type
+read_as_characters <- function(file) {
+  data <- fread(file)
+  data[] <- lapply(data, as.character)  # Convert all columns to character
+  return(data)
+}
+
+# Use the custom function to read and combine all CSV files
+lsat_data <- rbindlist(lapply(csv_files, read_as_characters), fill = TRUE)
+
+# Check the data to ensure it loaded correctly
+head(lsat_data)
+
+```
+
+```{r merge ground and satellite data}
+
+lsat_data <- lsat_data %>%
+  select(
+    organization_id, org_name, site_id, site_name, latitude, longitude, elevation, measured_on, 
+    landcover_id, data_source, measured_at, muc_code, muc_description, north_photo_url, 
+    east_photo_url, south_photo_url, west_photo_url, upward_photo_url, downward_photo_url, 
+    measure_lat, measure_long, measure_elev, loc_method, loc_accuracy, snow_ice, standing_water, 
+    muddy, dry_ground, leaves_on_trees, raining_snowing
+  ) %>%
+  mutate(
+    snow_ice = ifelse(!is.na(snow_ice), 0, 1),
+    standing_water = ifelse(!is.na(standing_water), 0, 1),
+    muddy = ifelse(!is.na(muddy), 0, 1),
+    dry_ground = ifelse(!is.na(dry_ground), 0, 1),
+    leaves_on_trees = ifelse(!is.na(leaves_on_trees), 0, 1),
+    raining_snowing = ifelse(!is.na(raining_snowing), 0, 1)
+  ) %>%
+  filter(if_all(everything(), ~ !is.na(.)))
+
+library(sf)
+# Convert the coordinates (measured_lat, measured_long) to an sf object
+lsat_data <- lsat_data %>%
+  st_as_sf(coords = c("measure_long", "measure_lat"), crs = 4326) %>%
+  mutate(sample_id = row_number())  # Assign a unique sample ID to each point
+
+# View the sf object
+print(lsat_data)
+
+# Perform spatial join using st_join
+merged_data <- st_join(lsat_data, globe_sf)
+
+# Check the merged data
+head(merged_data)
+
+```
+
+# Comparing Similarities and Differences
+
+```{r comparing surface conditions}
+# Calculate the agreement between snow_ice observations from satellite (.x) and ground (.y)
+surface_conditions <- merged_data %>%
+  summarise(
+    snow_ice_agreement = mean(snow_ice.x == snow_ice.y, na.rm = TRUE),
+    muddy_agreement = mean(muddy.x == muddy.y, na.rm = TRUE),  # Replace 'muddy' with actual column names
+    standing_water_agreement = mean(standing_water.x == standing_water.y, na.rm = TRUE)  # Replace with actual column names
+  )
+
+print(surface_conditions)
+
+```
+
+```{r}
+# Convert the spatial object back to a data frame to remove the geometry
+merged_data_df <- as.data.frame(merged_data)
+
+# Now summarize or manipulate the data as a regular data frame
+surface_conditions_summary <- merged_data_df %>%
+  summarise(
+    snow_ice_agreement = mean(snow_ice.x == snow_ice.y, na.rm = TRUE),
+    muddy_agreement = mean(muddy.x == muddy.y, na.rm = TRUE),
+    standing_water_agreement = mean(standing_water.x == standing_water.y, na.rm = TRUE)
+  )
+
+print(surface_conditions_summary)
+
+
+
+library(ggplot2)
+# Visualize the snow_ice agreement distribution
+ggplot(merged_data_df, aes(x = snow_ice.x, fill = factor(snow_ice.y))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Comparison of Snow/Ice Conditions: Satellite vs. Ground", x = "Satellite Snow/Ice", fill = "Ground Snow/Ice")
+
+
+```
+
+-   **Agreement = 1**: This means that for the given data points, the satellite and ground observations match exactly for `snow_ice`, `muddy`, and `standing_water`.
+
+-   **Geometry**: The result is a `MULTIPOINT` feature, meaning that this is still a spatial object containing the geometry (latitude/longitude coordinates) of the data points.
+
+```{r}
+# Convert elevation columns to numeric
+merged_data <- merged_data %>%
+  mutate(elevation.x = as.numeric(elevation.x),
+         elevation.y = as.numeric(elevation.y))
+# Check for non-numeric values (NA after conversion)
+sum(is.na(merged_data$elevation.x))
+sum(is.na(merged_data$elevation.y))
+
+
+# Calculate the difference in elevation between GO points and satellite measurements
+merged_data <- merged_data %>%
+  mutate(elevation_diff = abs(elevation.x - elevation.y))  # Adjust column names accordingly
+
+# Summarize the elevation differences
+elevation_summary <- merged_data %>%
+  summarise(mean_elevation_diff = mean(elevation_diff, na.rm = TRUE),
+            max_elevation_diff = max(elevation_diff, na.rm = TRUE),
+            min_elevation_diff = min(elevation_diff, na.rm = TRUE))
+
+print(elevation_summary)
+```
+
+-   **Mean Elevation Difference**: 0.0408
+
+-   **Max Elevation Difference**: 8.5
+
+-   **Min Elevation Difference**:0
+
+This suggests that, on average, the elevation between the satellite and ground measurements is quite close, with the largest difference being 8.5 units (probably meters)
+
+```{r}
+library(ggplot2)
+
+# Plot elevation differences
+ggplot(merged_data, aes(x = elevation.x, y = elevation.y)) +  # Replace with actual column names
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Comparison of Elevation: GO Points vs Satellite", 
+       x = "GO Point Elevation", 
+       y = "Satellite Elevation")
+
+
+```
+
+-   Each point on the scatter plot corresponds to an observation where elevation data were available from both the GO points and the satellite.
+
+-   The **red dashed line** represents the **ideal line of agreement** where the satellite elevation perfectly matches the GO point elevation (i.e., `Satellite Elevation = GO Point Elevation`).
+
+-   The points mostly fall along the red dashed line, indicating a high level of agreement between the satellite and GO point elevation measurements.
+
+<!-- -->
+
+-   If a point lies exactly on the line, it means that the **satellite and ground (GO point) elevation values are the same** for that observation.
+
+-   Deviations from the line (if any) would indicate differences between the satellite and ground elevation measurements. However, from the plot, the points seem to be very close to the line, suggesting **minimal differences** between the two datasets.
