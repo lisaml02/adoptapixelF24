@@ -112,9 +112,6 @@ Entry Site Definition”) or reported from the GLOBE Observer app
 (“GLOBE Observer App”)
 - measured_at: The date and time when the data were observed in UTC. This is
 listed for each protocol returned in ADAT. Format: yyyy-mm-ddTHH:MM:SS
-- muc_code: MUC code of the land cover site
-- muc_description: Description of the land cover site MUC code
-- north_photo_url: url to photo of site from north directional view
 - east_photo_url: url to photo of site from east directional view
 - south_photo_url: url to photo of site from south directional view
 - west_photo_url: url to photo of site from west directional view
