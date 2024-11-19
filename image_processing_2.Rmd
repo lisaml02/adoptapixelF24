@@ -1,0 +1,929 @@
+---
+title: "image_processing_2"
+output: html_document
+date: "2024-11-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading libraries}
+library(imager)
+library(randomForest)
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r}
+merged <- read_csv("merged_data.csv")
+```
+
+```{r processing image urls}
+# Load necessary libraries
+library(imager)
+
+# Define the number of samples you want
+sample_size <- 100  # Adjust this as needed
+
+# Randomly sample a subset of rows from the merged dataset
+set.seed(123)  # For reproducibility
+sampled_data <- merged[sample(1:nrow(merged), sample_size), ]
+
+# Extract the 6 columns with image URLs
+image_url_columns <- c("north_photo_url", "east_photo_url", "south_photo_url", 
+                       "west_photo_url", "upward_photo_url", "downward_photo_url")
+
+# Flatten the URLs into a single vector
+image_urls <- unlist(sampled_data[ , image_url_columns])
+
+# Remove any NA values (in case some URLs are missing)
+image_urls <- na.omit(image_urls)
+
+# Updated function to handle errors gracefully
+download_and_process_image <- function(image_url) {
+  temp_file <- tempfile(fileext = ".jpg")
+  
+  # Try to download the image and catch errors
+  tryCatch({
+    download.file(image_url, temp_file, mode = "wb")
+    image <- load.image(temp_file)
+    
+    # Check if the image loaded correctly
+    if (is.null(image)) {
+      return(NULL)
+    }
+    
+    # Ensure image values are properly scaled
+    if (max(image) <= 1) {
+      image <- image * 255
+    }
+    
+    # Greyscale conversion using the weighted method
+    greyscale_image <- 0.299 * image[,,1] + 0.587 * image[,,2] + 0.114 * image[,,3]
+    brightness <- mean(greyscale_image)
+    
+    red_mean <- mean(image[,,1])
+    green_mean <- mean(image[,,2])
+    blue_mean <- mean(image[,,3])
+    
+    # Return the metrics and the original image URL
+    return(list(image_url = image_url, brightness = brightness, 
+                red_mean = red_mean, green_mean = green_mean, blue_mean = blue_mean))
+  }, error = function(e) {
+    message("Error processing image from URL: ", image_url)
+    return(NULL)
+  })
+}
+
+# Re-run the image processing
+results <- lapply(image_urls, download_and_process_image)
+results <- results[!sapply(results, is.null)]  # Remove NULL results
+
+# Convert the results to a data frame
+results_df <- do.call(rbind, lapply(results, as.data.frame))
+
+# Merge results_df with sampled_data to add surface conditions
+results_df <- merge(results_df, sampled_data, 
+                    by.x = "image_url", 
+                    by.y = image_url_columns[which.max(colSums(!is.na(sampled_data[ , image_url_columns])))])
+
+# Check if the results are correct
+print(head(results_df))
+
+```
+
+```{r}
+summary(results_df)
+```
+
+```{r dist of brightness}
+ggplot(results_df, aes(x = brightness)) + 
+  geom_histogram(binwidth = 10, fill = "blue", color = "black") +
+  labs(title = "Distribution of Brightness", x = "Brightness", y = "Frequency")
+
+```
+
+The histogram of brightness distribution reveals that **most images have moderate brightness values**, centered around the range of 100 to 130, indicating they are neither too dark nor too bright. The brightness values **spread from near 0 (very dark) to around 200 (very bright)**, with a concentration between 80 and 150. The distribution is **slightly right-skewed**, suggesting a few images with unusually high brightness levels, potentially due to **strong lighting or reflective surfaces like snow or bright sky**.
+
+```{r dist of color channels}
+ggplot(results_df, aes(x = red_mean)) + 
+  geom_histogram(binwidth = 10, fill = "red", color = "black") +
+  labs(title = "Distribution of Red Mean", x = "Red Mean", y = "Frequency")
+
+ggplot(results_df, aes(x = green_mean)) + 
+  geom_histogram(binwidth = 10, fill = "green", color = "black") +
+  labs(title = "Distribution of Green Mean", x = "Green Mean", y = "Frequency")
+
+ggplot(results_df, aes(x = blue_mean)) + 
+  geom_histogram(binwidth = 10, fill = "blue", color = "black") +
+  labs(title = "Distribution of Blue Mean", x = "Blue Mean", y = "Frequency")
+
+```
+
+### Red Mean Distribution
+
+The histogram for **Red Mean** shows that **most images have red values centered between 90 and 130**, suggesting moderate red intensity. There are a few images with **low red intensity near 0**, indicating very little red content, and some with higher values up to 200. The distribution has a **slight right skew**, indicating a small number of images with high red content that might correspond to features like bright soil or vegetation under red light.
+
+### Green Mean Distribution
+
+The **Green Mean distribution** is similar to the Red Mean, with a central tendency between **100 and 140**, suggesting that green is moderately present in most images. There are some images with **low green intensity** and a few with higher values, extending towards 200. The shape is relatively symmetric compared to the Red Mean but still slightly skewed, indicating a **potentially broader spread** in green values, possibly due to vegetation variations.
+
+### Blue Mean Distribution
+
+The **Blue Mean distribution** is slightly different, with a concentration of values around **80 to 120**, suggesting a moderate blue intensity in most images. The distribution shows **a clearer right skew**, indicating a more significant number of images with lower blue content and a gradual drop-off towards higher blue values. This may suggest that **images with high blue intensity are less common**, likely corresponding to scenes with a lot of sky or water.
+
+### General Observations
+
+-   **Color Balance**: All three distributions show that the mean intensity values for red, green, and blue are centered around moderate levels, with **blue being slightly lower on average** compared to red and green.
+
+-   **Right Skew**: The slight right skew in each distribution indicates the presence of some images with unusually high color intensities, which may correlate with specific environmental conditions like bright sky, vegetation, or snow.
+
+```{r color normalization}
+# Calculate GCC, BCC, and RCC
+results_df$GCC <- results_df$green_mean / (results_df$red_mean + results_df$green_mean + results_df$blue_mean)
+results_df$BCC <- results_df$blue_mean / (results_df$red_mean + results_df$green_mean + results_df$blue_mean)
+results_df$RCC <- results_df$red_mean / (results_df$red_mean + results_df$green_mean + results_df$blue_mean)
+
+# Inspect the new coordinates
+summary(results_df)
+
+```
+
+**Chromatic coordinates** are used to represent the relative contributions of different color channels (red, green, and blue) in an image. Instead of considering the absolute intensities of these channels, chromatic coordinates normalize these values to describe the **proportion of each color relative to the overall color intensity**. This helps in analyzing color balance and distribution more meaningfully, especially when comparing images under different lighting conditions.
+
+```{r distribution of chromatic coords}
+library(ggplot2)
+
+# Scatter plot of GCC vs. brightness
+ggplot(results_df, aes(x = brightness, y = GCC)) +
+  geom_point(alpha = 0.5, color = "green") +
+  labs(title = "Scatter Plot of Brightness vs. GCC", x = "Brightness", y = "GCC")
+
+# Scatter plot of BCC vs. brightness
+ggplot(results_df, aes(x = brightness, y = BCC)) +
+  geom_point(alpha = 0.5, color = "blue") +
+  labs(title = "Scatter Plot of Brightness vs. BCC", x = "Brightness", y = "BCC")
+
+# Scatter plot of RCC vs. brightness
+ggplot(results_df, aes(x = brightness, y = RCC)) +
+  geom_point(alpha = 0.5, color = "red") +
+  labs(title = "Scatter Plot of Brightness vs. RCC", x = "Brightness", y = "RCC")
+
+```
+
+### Scatter Plot of Brightness vs. GCC
+
+-   **Overall Pattern**: The scatter plot between **Brightness** and **Green Chromatic Coordinate (GCC)** shows a slight downward trend, suggesting a weak negative relationship.
+
+-   **Higher GCC Values**: Images with **higher GCC values (above 0.40)** are more likely to have moderate brightness levels (around 80 to 120).
+
+-   **Lower Brightness Values**: There are a few data points with **low brightness values (below 50)**, but these don't show a strong pattern with GCC.
+
+### Scatter Plot of Brightness vs. BCC
+
+-   **Overall Pattern**: The scatter plot between **Brightness** and **Blue Chromatic Coordinate (BCC)** appears scattered, with no clear linear relationship. However, there is a slight clustering of points around brightness levels of 80 to 120 and BCC values of 0.25 to 0.35.
+
+-   **Variation in BCC**: The spread of BCC values is more pronounced compared to GCC, indicating a **wider range of blue intensity** as brightness changes.
+
+-   **Higher Brightness**: Some points with higher brightness (over 150) show moderate BCC values, suggesting **blue might not significantly contribute to overall brightness**.
+
+### Scatter Plot of Brightness vs. RCC
+
+-   **Overall Pattern**: The scatter plot between **Brightness** and **Red Chromatic Coordinate (RCC)** also shows no clear linear trend, but points seem more concentrated around certain brightness levels.
+
+-   **Moderate RCC Values**: Most points are clustered between brightness levels of 80 to 130, with RCC values between 0.30 and 0.35.
+
+-   **Outliers**: There are a few outliers with **low brightness and varying RCC values**, which could indicate specific features, such as shadows or reddish objects.
+
+### General Insights
+
+-   **Weak Correlation**: There seems to be a generally weak correlation between brightness and each chromatic coordinate (GCC, BCC, RCC), suggesting that brightness alone might not be a strong predictor of color composition.
+
+-   **Potential Factors**: The scatter plots indicate that **other environmental or image-specific factors** may influence the color distribution, such as lighting conditions, shadows, or the presence of specific surface types (e.g., vegetation or sky).
+
+### 
+
+```{r color coords by snow presence}
+# Box plot for GCC by snow presence
+ggplot(results_df, aes(x = factor(snow_ice), y = GCC)) +
+  geom_boxplot(fill = "green") +
+  labs(title = "Box Plot of GCC by Snow Presence", x = "Snow Presence (0 = No, 1 = Yes)", y = "GCC")
+
+# Box plot for BCC by snow presence
+ggplot(results_df, aes(x = factor(snow_ice), y = BCC)) +
+  geom_boxplot(fill = "blue") +
+  labs(title = "Box Plot of BCC by Snow Presence", x = "Snow Presence (0 = No, 1 = Yes)", y = "BCC")
+
+# Box plot for RCC by snow presence
+ggplot(results_df, aes(x = factor(snow_ice), y = RCC)) +
+  geom_boxplot(fill = "red") +
+  labs(title = "Box Plot of RCC by Snow Presence", x = "Snow Presence (0 = No, 1 = Yes)", y = "RCC")
+
+```
+
+### Box Plot of GCC by Snow Presence
+
+-   **General Pattern**: The **GCC (Green Chromatic Coordinate)** appears to be **lower in images where snow is present (1)** compared to images without snow (0).
+
+-   **Variation**: The GCC values for images without snow have a **wider interquartile range (IQR)** and a higher median. The **presence of an outlier** above 0.45 indicates that some images have exceptionally high green content when snow is absent.
+
+-   **Implication**: Snow scenes generally have less green in the images, likely due to the white snow cover dominating the visual composition.
+
+### Box Plot of BCC by Snow Presence
+
+-   **General Pattern**: The **BCC (Blue Chromatic Coordinate)** is **higher in images where snow is present (1)**. The median BCC for snow images is notably higher, with a more compact distribution compared to non-snow images.
+
+-   **Variation**: Images without snow have a wider spread, and **multiple outliers** at lower BCC values suggest scenes with minimal blue content, likely due to less sky or water in those images.
+
+-   **Implication**: The higher blue content in snow images could be related to the presence of a bright sky or the reflection of blue light on the snow.
+
+### Box Plot of RCC by Snow Presence
+
+-   **General Pattern**: The **RCC (Red Chromatic Coordinate)** is **lower in images where snow is present (1)**. The median and the entire distribution shift downward compared to non-snow images.
+
+-   **Variation**: There is a **narrower distribution of RCC values** for snow images, indicating less variability in red content, while non-snow images show a wider range and outliers at both high and low values.
+
+-   **Implication**: Snow scenes tend to have reduced red content, which makes sense since snow reflects more blue light and less red light compared to soil or vegetation.
+
+### General Insights
+
+-   **Color Changes with Snow**: The presence of snow is associated with **lower GCC and RCC but higher BCC**, reflecting the dominance of blue in snow scenes and the lack of vegetation (green) and soil (red) colors.
+
+-   **Potential Analysis**: These patterns support the hypothesis that chromatic coordinates can help distinguish snow-covered scenes from non-snow scenes. Further statistical testing could help solidify these findings.
+
+```{r visualizing extreme values and patterns}
+# Histogram of brightness
+ggplot(results_df, aes(x = brightness)) +
+  geom_histogram(binwidth = 10, fill = "gray", color = "black") +
+  labs(title = "Distribution of Brightness", x = "Brightness", y = "Frequency")
+
+# Scatter plot of GCC vs. BCC
+ggplot(results_df, aes(x = GCC, y = BCC, color = factor(snow_ice))) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Scatter Plot of GCC vs. BCC", x = "GCC", y = "BCC", color = "Snow Presence")
+
+```
+
+### Interpretation of GCC vs. BCC Scatter Plot
+
+-   **Negative Relationship**: The scatter plot shows a **clear negative correlation** between GCC and BCC, meaning that as the green chromatic coordinate increases, the blue chromatic coordinate tends to decrease, and vice versa. This suggests a trade-off between green and blue content in the images, likely driven by the dominant environmental features.
+
+-   **Snow Presence Differentiation**:
+
+    -   **Snow Presence (1, in cyan)**: Points corresponding to snow presence are generally clustered at **higher BCC values and lower GCC values**, which aligns with the expectation that snow scenes reflect more blue light and less green light.
+
+    -   **No Snow (0, in red)**: Points without snow show a wider spread in GCC and BCC values, with **higher GCC values** and **lower BCC values**, indicating more vegetation or other green-dominant features.
+
+-   **Clusters and Outliers**: There are a few outliers, particularly at higher GCC values and lower BCC values, which could represent unique scenes with significant vegetation and minimal sky or snow.
+
+### General Insights
+
+-   **Environmental Feature Influence**: The negative relationship between GCC and BCC supports the idea that color composition shifts depending on the dominant environmental elements (e.g., vegetation versus snow).
+
+-   **Snow Detection**: The clustering pattern suggests that GCC and BCC could serve as useful indicators for distinguishing between snowy and non-snowy scenes. Snow presence is generally associated with lower green and higher blue content.
+
+```{r examining spectral band values individually}
+library(ggplot2)
+
+# Scatter plot for Red (x) vs. Blue (y)
+ggplot(results_df, aes(x = red_mean, y = blue_mean)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  labs(title = "Scatter Plot of Red Mean vs. Blue Mean", x = "Red Mean (x)", y = "Blue Mean (y)")
+
+# Scatter plot for Red (x) vs. Green (z)
+ggplot(results_df, aes(x = red_mean, y = green_mean)) +
+  geom_point(alpha = 0.6, color = "green") +
+  labs(title = "Scatter Plot of Red Mean vs. Green Mean", x = "Red Mean (x)", y = "Green Mean (z)")
+
+# Scatter plot for Blue (y) vs. Green (z)
+ggplot(results_df, aes(x = blue_mean, y = green_mean)) +
+  geom_point(alpha = 0.6, color = "cyan") +
+  labs(title = "Scatter Plot of Blue Mean (y) vs. Green Mean (z)", x = "Blue Mean (y)", y = "Green Mean (z)")
+
+```
+
+### Scatter Plot of Red Mean vs. Blue Mean
+
+-   **Positive Correlation**: There appears to be a **moderate positive relationship** between Red Mean and Blue Mean. As the red intensity increases, the blue intensity tends to increase as well, although there is some variability.
+
+-   **Clustered Data**: Most of the data points are clustered around the 75 to 150 range for both red and blue intensities. The spread indicates that **both color channels increase together**, likely due to environmental conditions that reflect both red and blue light, such as scenes with soil and sky.
+
+-   **Outliers**: There are a few outliers with very low red or blue mean values, suggesting images that are predominantly a single color or affected by shadows or bright lighting.
+
+### Scatter Plot of Red Mean vs. Green Mean
+
+-   **Strong Positive Correlation**: There is a **strong positive linear relationship** between Red Mean and Green Mean, indicating that as the red intensity increases, the green intensity almost always increases as well. This is expected in scenes dominated by vegetation, where both red and green channels are present in large amounts.
+
+-   **Tightly Clustered**: The data points are closely packed along a diagonal line, suggesting **consistent color composition** in the images. The strong correlation may also reflect similar environmental lighting conditions affecting both channels.
+
+-   **Uniform Distribution**: There are fewer outliers, and the points are uniformly distributed along the line, reinforcing the idea of a strong association.
+
+### Scatter Plot of Blue Mean vs. Green Mean
+
+-   **Moderate Positive Correlation**: The relationship between Blue Mean and Green Mean is **moderately positive**, with some data points deviating from a perfect linear trend. As blue intensity increases, green intensity generally increases as well, but with more variation compared to the Red-Green relationship.
+
+-   **Spread of Points**: The points are more spread out compared to the Red-Green plot, indicating that **blue and green intensities do not always change proportionally**. This could be due to varying environmental features like the presence of water or vegetation.
+
+-   **Environmental Factors**: The spread suggests that blue and green content may be affected by different factors, such as reflections from water bodies (increasing blue) or vegetation (increasing green).
+
+### General Insights
+
+-   **Color Relationships**: The Red-Green relationship is the strongest and most linear, indicating consistent co-occurrence of these colors, likely in vegetation-heavy scenes. The Red-Blue and Blue-Green relationships are positive but less consistent, possibly reflecting the diversity of environmental scenes.
+
+-   **Potential Analysis**: These correlations could be useful for understanding the environmental composition of the scenes, and further analysis could explore how these relationships vary with surface conditions like vegetation or water presence.
+
+```{r calculation of single value from 3 dimensions}
+# Calculate the Euclidean norm
+results_df$color_magnitude <- sqrt(results_df$red_mean^2 + results_df$blue_mean^2 + results_df$green_mean^2)
+
+# Summary of the new color magnitude column
+summary(results_df$color_magnitude)
+
+```
+
+```{r visualization of single value}
+# Histogram of the color magnitude
+ggplot(results_df, aes(x = color_magnitude)) +
+  geom_histogram(binwidth = 10, fill = "purple", color = "black") +
+  labs(title = "Distribution of Color Magnitude", x = "Color Magnitude", y = "Frequency")
+
+```
+
+### Interpretation of Color Magnitude Distribution
+
+-   **Central Tendency**: The distribution of color magnitude is centered around **200**, indicating that most images have a combined color intensity that falls within this range. This suggests that the overall color content in these images is moderate, with a balance of red, green, and blue channels contributing to the color magnitude.
+
+-   **Spread and Skewness**: The distribution has a **slight right skew**, with some images having higher color magnitudes up to and beyond 300. The tail on the right indicates that a few images have very high overall color intensity, possibly due to bright, well-lit scenes or highly saturated colors.
+
+-   **Low Color Magnitude**: There are a few images with **very low color magnitude (close to 0)**, suggesting images that are nearly monochromatic, underexposed, or taken in poor lighting conditions.
+
+-   **Peak Frequency**: The highest frequency occurs around **180 to 220**, showing that this is the most common range for color magnitude.
+
+### General Insights
+
+-   **Environmental Factors**: The variation in color magnitude could be influenced by different environmental conditions, such as lighting, presence of reflective surfaces (e.g., snow or water), or color-rich scenes (e.g., vegetation).
+
+-   **Potential Analysis**: The outliers with low or high color magnitude might warrant further investigation to understand the specific conditions that caused them. Additionally, examining how color magnitude correlates with other variables like snow presence or time of day could provide deeper insights.
+
+```{r}
+# Randomly sample 10 image URLs from results_df
+set.seed(123)  # For reproducibility
+sample_indices <- sample(1:nrow(results_df), 10)
+sampled_images_df <- results_df[sample_indices, ]
+
+# Display the sampled images and their attributes
+print(sampled_images_df)
+
+library(imager)
+
+# Function to download and display an image
+download_and_display_image <- function(image_url) {
+  temp_file <- tempfile(fileext = ".jpg")
+  download.file(image_url, temp_file, mode = "wb")
+  image <- load.image(temp_file)
+  plot(image, main = paste("Image URL:", image_url))
+}
+
+# Download and display each of the 10 sampled images
+for (i in 1:nrow(sampled_images_df)) {
+  download_and_display_image(sampled_images_df$image_url[i])
+}
+
+```
+
+```{r}
+# Create a summary table of digital attributes for the sampled images
+sampled_attributes <- sampled_images_df[, c("image_url", "brightness", "red_mean", "green_mean", "blue_mean", "color_magnitude")]
+print(sampled_attributes)
+
+```
+
+# clustering
+
+```{r setting up data}
+# Load necessary library
+library(stats)
+
+# Select the digital attributes for clustering
+digital_attributes <- results_df[, c("brightness", "red_mean", "green_mean", "blue_mean", "GCC", "BCC", "RCC", "color_magnitude")]
+
+# Scale the data
+scaled_data <- scale(digital_attributes)
+
+```
+
+```{r finding optimal k}
+# Calculate the total within-cluster sum of squares for different numbers of clusters
+wss <- sapply(1:10, function(k) {
+  kmeans(scaled_data, centers = k, nstart = 10)$tot.withinss
+})
+
+# Plot the Elbow Method
+plot(1:10, wss, type = "b", pch = 19, frame = FALSE,
+     xlab = "Number of Clusters",
+     ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Method for Determining Optimal Clusters")
+
+```
+
+we'll stick with k = 4 for now to prevent overfitting
+
+```{r k means clustering with k = 4}
+# Perform k-means clustering with 4 clusters
+set.seed(123)  # For reproducibility
+kmeans_result <- kmeans(scaled_data, centers = 4, nstart = 25)
+
+# Add the cluster assignment to results_df
+results_df$cluster <- kmeans_result$cluster
+
+```
+
+```{r analyze cluster assignments}
+# Analyze the distribution of clusters with respect to snow_ice
+cat("Cluster Distribution for Snow Ice:\n")
+print(table(results_df$cluster, results_df$snow_ice))
+
+# Analyze the distribution of clusters with respect to leaves_on_trees
+cat("\nCluster Distribution for Leaves on Trees:\n")
+print(table(results_df$cluster, results_df$leaves_on_trees))
+
+```
+
+```{r visualize clusters}
+library(ggplot2)
+
+# Visualize the clusters
+ggplot(results_df, aes(x = brightness, y = color_magnitude, color = factor(cluster))) +
+  geom_point(alpha = 0.6) +
+  labs(title = "K-Means Clustering with 4 Clusters",
+       x = "Brightness", y = "Color Magnitude", color = "Cluster")
+
+```
+
+-   **Cluster Separation**: The scatter plot shows four distinct clusters based on **Brightness** and **Color Magnitude**. The clusters are color-coded, and the data points form clear groupings along an upward trend.
+
+-   **Gradient Trend**: There is a **positive linear relationship** between Brightness and Color Magnitude, where higher brightness values are associated with higher color magnitudes. This trend suggests that images with greater brightness also have more intense overall color content.
+
+-   **Cluster Characteristics**:
+
+    -   **Cluster 1 (Red Points)**: This cluster consists of images with **low brightness and low color magnitude**, likely representing darker or less color-saturated scenes.
+
+    -   **Cluster 2 (Green Points)**: This cluster has **higher brightness and higher color magnitude**, suggesting scenes that are well-lit and color-intense.
+
+    -   **Cluster 3 (Cyan Points)** and **Cluster 4 (Purple Points)**: These clusters lie in between, with moderate values for both attributes. They represent a transition from less bright to more bright and color-rich scenes.
+
+### General Insights
+
+-   The clustering appears to have successfully grouped the images based on overall brightness and color intensity, which could be useful for distinguishing different environmental conditions or image qualities.
+
+-   The **progression from Cluster 1 to Cluster 2** along the trend line could reflect varying lighting conditions or differences in environmental features captured in the images.
+
+```{r prepare data for rf}
+# Load the necessary library
+library(randomForest)
+
+# Prepare the data for Random Forest
+# Include digital attributes, cluster assignment, and target variables
+rf_data <- results_df[, c("brightness", "red_mean", "green_mean", "blue_mean",
+                          "GCC", "BCC", "RCC", "color_magnitude", "cluster",
+                          "snow_ice", "leaves_on_trees")]
+
+# Convert target variables to factors for classification
+rf_data$snow_ice <- as.factor(rf_data$snow_ice)
+rf_data$leaves_on_trees <- as.factor(rf_data$leaves_on_trees)
+
+```
+
+```{r train rf for snow ice}
+# Train a Random Forest model to predict snow_ice
+set.seed(123)  # For reproducibility
+rf_model_snow <- randomForest(snow_ice ~ ., data = rf_data[, -11],  # Exclude leaves_on_trees
+                              ntree = 500, mtry = 3, importance = TRUE)
+
+# Print the model summary
+print(rf_model_snow)
+
+# Check variable importance
+importance(rf_model_snow)
+varImpPlot(rf_model_snow)
+
+```
+
+```{r train rf for leaves}
+# Train a Random Forest model to predict leaves_on_trees
+set.seed(123)
+rf_model_leaves <- randomForest(leaves_on_trees ~ ., data = rf_data[, -10],  # Exclude snow_ice
+                                ntree = 500, mtry = 3, importance = TRUE)
+
+# Print the model summary
+print(rf_model_leaves)
+
+# Check variable importance
+importance(rf_model_leaves)
+varImpPlot(rf_model_leaves)
+
+```
+
+```{r split into train and test sets}
+# Load necessary library
+library(caret)
+
+# Set a seed for reproducibility
+set.seed(123)
+
+# Create a train-test split (e.g., 70% train, 30% test)
+train_index <- createDataPartition(rf_data$snow_ice, p = 0.7, list = FALSE)
+train_data <- rf_data[train_index, ]
+test_data <- rf_data[-train_index, ]
+
+```
+
+```{r make predictions}
+# Predict snow_ice
+predictions_snow <- predict(rf_model_snow, newdata = test_data)
+
+# Predict leaves_on_trees
+predictions_leaves <- predict(rf_model_leaves, newdata = test_data)
+
+```
+
+```{r evaluate model performance}
+# Load the caret package for evaluation
+library(caret)
+
+# Evaluate the snow_ice model
+conf_matrix_snow <- confusionMatrix(predictions_snow, test_data$snow_ice)
+print(conf_matrix_snow)
+
+# Evaluate the leaves_on_trees model
+conf_matrix_leaves <- confusionMatrix(predictions_leaves, test_data$leaves_on_trees)
+print(conf_matrix_leaves)
+
+```
+
+Once again, we're getting an accuracy rate that indicates overfitting. Let's try a simpler model like logistic regression.
+
+```{r prepare data for logistic reg}
+# Load necessary library
+library(caret)
+
+# Ensure the target variables are factors
+rf_data$snow_ice <- as.factor(rf_data$snow_ice)
+rf_data$leaves_on_trees <- as.factor(rf_data$leaves_on_trees)
+
+# Split the data into training and test sets (if not already done)
+set.seed(123)
+train_index <- createDataPartition(rf_data$snow_ice, p = 0.7, list = FALSE)
+train_data <- rf_data[train_index, ]
+test_data <- rf_data[-train_index, ]
+
+```
+
+```{r train logistic models}
+# Train a logistic regression model for snow_ice
+model_snow <- glm(snow_ice ~ brightness + red_mean + green_mean + blue_mean + 
+                  GCC + BCC + RCC + color_magnitude, 
+                  data = train_data, family = binomial)
+
+# Train a logistic regression model for leaves_on_trees
+model_leaves <- glm(leaves_on_trees ~ brightness + red_mean + green_mean + blue_mean + 
+                    GCC + BCC + RCC + color_magnitude, 
+                    data = train_data, family = binomial)
+
+```
+
+```{r checking for multicollinearity}
+# Load the car package for VIF calculation
+library(car)
+
+# Check VIF values
+vif_values <- vif(model_snow)
+print(vif_values)
+
+# If VIF > 5, multicollinearity is a potential issue
+
+```
+
+uh oh, perfect multicollinearity....
+
+```{r check correlations}
+# Compute the correlation matrix for the predictors
+cor_matrix <- cor(train_data[, c("brightness", "red_mean", "green_mean", "blue_mean", 
+                                 "GCC", "BCC", "RCC", "color_magnitude")])
+print(cor_matrix)
+
+# Visualize the correlation matrix
+library(corrplot)
+corrplot(cor_matrix, method = "circle")
+
+```
+
+1.  **High Positive Correlations**:
+
+    -   **Brightness, Red Mean, Green Mean, Blue Mean, and Color Magnitude**: These attributes are **highly correlated**, as indicated by the dark blue circles with correlation coefficients close to **1**. This suggests that as one of these attributes increases, the others also tend to increase. This makes sense because these metrics are all measures of overall intensity and color in an image.
+
+    -   **Color Magnitude and Brightness**: A strong positive correlation indicates that as images get brighter, their overall color intensity also increases.
+
+2.  **Moderate to Low Correlations**:
+
+    -   **GCC, BCC, and RCC**: These chromatic coordinates show lower and more varied correlations with brightness and color means. For example:
+
+        -   **GCC (Green Chromatic Coordinate)**: Shows some correlation with **Green Mean** and **RCC**, but not as strong as the intensity measures.
+
+        -   **BCC (Blue Chromatic Coordinate)**: Has a moderate negative correlation with **GCC** and a positive relationship with **Blue Mean**.
+
+        -   **RCC (Red Chromatic Coordinate)**: Displays moderate correlations with **Red Mean** and is negatively correlated with **BCC**.
+
+3.  **Potential Issues**:
+
+    -   The high correlations among **brightness, red mean, green mean, blue mean, and color magnitude** indicate **multicollinearity**, which could impact models like logistic regression. It may be beneficial to select one representative variable from this group or use techniques like **PCA** to reduce dimensionality.
+
+### Next Steps
+
+-   **Feature Selection**: Consider removing redundant features to simplify your models or using methods like PCA to address multicollinearity.
+
+-   **Model Impact**: Understanding these correlations can help you interpret which variables are driving the predictions and how they may impact model performance.
+
+# LASSO regression
+
+```{r}
+# Install glmnet if you haven't already
+# install.packages("glmnet")
+
+# Load the package
+library(glmnet)
+
+```
+
+```{r preparing data for LASSO}
+# Convert the predictors to a matrix
+x <- as.matrix(rf_data[, c("brightness", "red_mean", "green_mean", "blue_mean", 
+                           "GCC", "BCC", "RCC", "color_magnitude")])
+
+# Ensure the target variables are factors
+y_snow <- as.factor(rf_data$snow_ice)
+y_leaves <- as.factor(rf_data$leaves_on_trees)
+
+```
+
+```{r fit lasso}
+# Fit a Lasso model for snow_ice
+lasso_model_snow <- cv.glmnet(x, y_snow, family = "binomial", alpha = 1)
+
+# Fit a Lasso model for leaves_on_trees
+lasso_model_leaves <- cv.glmnet(x, y_leaves, family = "binomial", alpha = 1)
+
+```
+
+```{r inspect models}
+# Optimal lambda values
+lambda_snow <- lasso_model_snow$lambda.min
+lambda_leaves <- lasso_model_leaves$lambda.min
+
+print(lambda_snow)
+print(lambda_leaves)
+
+# Coefficients at the optimal lambda
+coef_snow <- coef(lasso_model_snow, s = "lambda.min")
+coef_leaves <- coef(lasso_model_leaves, s = "lambda.min")
+
+print(coef_snow)
+print(coef_leaves)
+
+```
+
+```{r make predictions}
+# Prepare the test data
+x_test <- as.matrix(test_data[, c("brightness", "red_mean", "green_mean", "blue_mean", 
+                                  "GCC", "BCC", "RCC", "color_magnitude")])
+
+# Predict probabilities
+prob_snow <- predict(lasso_model_snow, newx = x_test, s = "lambda.min", type = "response")
+prob_leaves <- predict(lasso_model_leaves, newx = x_test, s = "lambda.min", type = "response")
+
+# Convert probabilities to class labels (using 0.5 as the threshold)
+predictions_snow <- ifelse(prob_snow > 0.5, "1", "0")
+predictions_leaves <- ifelse(prob_leaves > 0.5, "1", "0")
+
+# Convert predictions to factors
+predictions_snow <- as.factor(predictions_snow)
+predictions_leaves <- as.factor(predictions_leaves)
+
+```
+
+```{r evaluate the models}
+# Load the caret package for confusion matrix
+library(caret)
+
+# Evaluate the snow_ice model
+conf_matrix_snow <- confusionMatrix(predictions_snow, test_data$snow_ice)
+print(conf_matrix_snow)
+
+# Evaluate the leaves_on_trees model
+conf_matrix_leaves <- confusionMatrix(predictions_leaves, test_data$leaves_on_trees)
+print(conf_matrix_leaves)
+
+```
+
+These confusion matrices indicate class imbalance and poor performance for one of the classes.
+
+```{r manual oversampling}
+
+library(caret)
+
+# Oversample the minority class using the upSample function from caret
+oversampled_data <- upSample(x = rf_data[, -which(names(rf_data) == "snow_ice")],
+                             y = rf_data$snow_ice)
+# The resulting oversampled_data will have more balanced classes
+
+```
+
+```{r using balanced data for LASSO}
+# Prepare the data for Lasso regression
+x <- as.matrix(oversampled_data[, -which(names(oversampled_data) == "Class")])
+y <- oversampled_data$Class
+
+# Train the Lasso model with cross-validation
+lasso_model <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+
+# Check the optimal lambda and coefficients
+optimal_lambda <- lasso_model$lambda.min
+print(optimal_lambda)
+
+# Get the coefficients at the optimal lambda
+selected_features <- coef(lasso_model, s = "lambda.min")
+print(selected_features)
+
+```
+
+-   **Optimal Lambda**: The best `lambda` value found through cross-validation is `0.0003695745`. This value controls the strength of the penalty applied to the model's coefficients.
+
+-   **Feature Coefficients**:
+
+    -   Features with **non-zero coefficients**: These are the features that the Lasso model has selected as important for the prediction. In your case:
+
+        -   **red_mean**: Has a positive coefficient (`0.2943102`), indicating a positive association with the target variable.
+
+        -   **green_mean**: Has a negative coefficient (`-0.8462913`), indicating a negative association.
+
+        -   **blue_mean**: Has a positive coefficient (`0.6660893`).
+
+        -   **GCC**: Has a large positive coefficient (`613.6922879`), suggesting a strong influence on the outcome.
+
+        -   **cluster**: Has a negative coefficient (`-10.9197268`).
+
+        -   **leaves_on_trees**: Has a negative coefficient (`-6.5518812`).
+
+    -   Features with **zero coefficients**: These features were deemed less important and were "shrunk" to zero by the Lasso penalty, effectively removing them from the model:
+
+        -   **brightness**, **BCC**, **RCC**, **color_magnitude**.
+
+```{r adjust threshold for classification}
+# Prepare the test data with all 10 predictors
+x_test <- as.matrix(test_data[, c("brightness", "red_mean", "green_mean", "blue_mean", 
+                                  "GCC", "BCC", "RCC", "color_magnitude", 
+                                  "cluster", "leaves_on_trees")])
+
+
+# Predict probabilities using the Lasso model
+probabilities <- predict(lasso_model, newx = x_test, s = "lambda.min", type = "response")
+
+# Convert probabilities to class labels (using a 0.5 threshold)
+predictions <- ifelse(probabilities > 0.5, "1", "0")
+predictions <- as.factor(predictions)
+
+```
+
+```{r evaluate adjusted model}
+# Ensure test_data$snow_ice is a factor with matching levels
+test_data$snow_ice <- as.factor(test_data$snow_ice)
+
+
+# Load the caret package for evaluation
+library(caret)
+
+# Calculate the confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data$snow_ice)
+print(conf_matrix)
+
+
+# Ensure test_data$leaves_on_trees is a factor with matching levels
+test_data$leaves_on_trees <- as.factor(test_data$leaves_on_trees)
+
+
+# Load the caret package for evaluation
+library(caret)
+
+# Calculate the confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data$leaves_on_trees)
+print(conf_matrix)
+```
+
+# Random Forest
+
+```{r redownsample data}
+# Ensure the target variable is a factor
+rf_data$snow_ice <- as.factor(rf_data$snow_ice)
+
+# Downsample the majority class
+set.seed(123)  # For reproducibility
+downsampled_data <- downSample(x = rf_data[, -which(names(rf_data) == "snow_ice")],
+                               y = rf_data$snow_ice)
+
+# The result will be a balanced dataset with equal representation of both classes
+# Add the target variable back to the downsampled data
+names(downsampled_data)[ncol(downsampled_data)] <- "snow_ice"
+
+```
+
+```{r verify class distribution}
+# Check the distribution of the classes
+table(downsampled_data$snow_ice)
+
+```
+
+```{r train RF classifier again}
+library(randomForest)
+# Set a seed for reproducibility
+set.seed(123)
+
+# Train the Random Forest model
+rf_model <- randomForest(snow_ice ~ ., 
+                         data = downsampled_data, 
+                         ntree = 500,        # Number of trees
+                         mtry = 3,           # Number of features to consider at each split
+                         importance = TRUE)  # Calculate feature importance
+
+```
+
+```{r make predictions on test set}
+# Make predictions on the test data
+rf_predictions <- predict(rf_model, newdata = test_data)
+
+```
+
+```{r evaluate rf downsample model}
+# Load the caret package
+library(caret)
+
+# Calculate the confusion matrix
+conf_matrix_rf <- confusionMatrix(rf_predictions, test_data$snow_ice)
+print(conf_matrix_rf)
+
+```
+
+```{r analyze feature importance}
+# Plot the feature importance
+varImpPlot(rf_model)
+
+```
+
+```{r tuning rf hyperparams}
+# Rename class levels to valid R variable names
+levels(downsampled_data$snow_ice) <- c("Class0", "Class1")
+levels(test_data$snow_ice) <- c("Class0", "Class1")
+
+# Load the caret package
+library(caret)
+
+# Update the trainControl settings
+control <- trainControl(
+  method = "cv",
+  number = 5,                    # 5-fold cross-validation
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = twoClassSummary, # Use twoClassSummary for ROC
+  sampling = "down"              # Downsample the majority class within each fold
+)
+
+
+# Define the grid of hyperparameters for mtry only
+tune_grid <- expand.grid(
+  mtry = c(2, 3, 4, 5)  # Different values for mtry
+)
+
+# Train the Random Forest model with updated control
+set.seed(123)
+rf_model_final <- train(
+  snow_ice ~ ., 
+  data = downsampled_data,
+  method = "rf",
+  trControl = control,
+  metric = "ROC",                # Use ROC as the evaluation metric
+  tuneGrid = tune_grid,
+  ntree = 500
+)
+
+```
+
+```{r}
+# Make predictions on the test data
+rf_predictions_final <- predict(rf_model_final, newdata = test_data)
+# Load the caret package if not already loaded
+library(caret)
+
+# Calculate and print the confusion matrix
+conf_matrix_rf_final <- confusionMatrix(rf_predictions_final, test_data$snow_ice)
+print(conf_matrix_rf_final)
+
+```

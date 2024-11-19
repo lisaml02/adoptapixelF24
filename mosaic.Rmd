@@ -1,0 +1,160 @@
+---
+title: "pf_image_collaging"
+output: html_document
+date: "2024-11-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading libraries}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(imager)
+library(png)
+```
+
+```{r load data}
+globe <- read_csv("globe_cv3.csv")
+```
+
+```{r looking for rejected entries}
+# Extract the 6 columns with image URLs from the GLOBE data
+image_url_columns <- c("north_photo_url", "east_photo_url", "south_photo_url", 
+                       "west_photo_url", "upward_photo_url", "downward_photo_url")
+
+# Find rows where any of the URL columns contain "rejected"
+rejected_entries <- globe %>%
+  filter(apply(.[, image_url_columns], 1, function(row) any(grepl("rejected", row, ignore.case = TRUE))))
+
+# Print the rows with "rejected" entries
+print("Rows with 'rejected' entries:")
+print(rejected_entries)
+
+```
+
+```{r removing rejected rows}
+# Extract the 6 columns with image URLs from the GLOBE data
+image_url_columns <- c("north_photo_url", "east_photo_url", "south_photo_url", 
+                       "west_photo_url", "upward_photo_url", "downward_photo_url")
+
+# Identify rows where any of the URL columns contain "rejected"
+rows_with_rejected <- apply(globe[, image_url_columns], 1, function(row) any(grepl("rejected", row, ignore.case = TRUE)))
+
+# Remove these rows from the globe dataset
+globe_cleaned <- globe[!rows_with_rejected, ]
+
+# Check the number of rows in the cleaned dataset
+print(paste("Number of rows in the cleaned dataset:", nrow(globe_cleaned)))
+
+```
+
+```{r saving cleaned globe data}
+write_csv(globe_cleaned, "globe_cv4.csv")
+```
+
+```{r loading parallel processing libraries}
+# Load necessary libraries
+library(imager)
+library(parallel)
+library(foreach)
+library(doParallel)
+```
+
+```{r set up parallel processing}
+# Set up parallel backend
+num_cores <- detectCores() - 1  # Use one less than the total number of cores
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+```
+
+```{r Define Functions for Image Processing and Mosaic Creation}
+# Function to download and resize an image
+download_and_resize_image <- function(image_url, width = 250, height = 188) {
+  temp_file <- tempfile(fileext = ".jpg")
+  tryCatch({
+    download.file(image_url, temp_file, mode = "wb")
+    image <- load.image(temp_file)
+    
+    # Resize the image
+    resized_image <- resize(image, width, height)
+    return(resized_image)
+  }, error = function(e) {
+    message("Error processing image from URL: ", image_url)
+    return(NULL)
+  })
+}
+
+# Function to create a mosaic from 6 images
+create_mosaic <- function(image_urls) {
+  # Download and resize each image
+  images <- lapply(image_urls, download_and_resize_image)
+  
+  # Remove any NULL images (in case of download errors)
+  images <- Filter(Negate(is.null), images)
+  
+  # Check if we have 6 images; if not, return NULL
+  if (length(images) != 6) {
+    message("Not enough images to create a mosaic.")
+    return(NULL)
+  }
+  
+  # Concatenate images horizontally
+  mosaic <- imappend(images, axis = "x")  # "x" for horizontal concatenation
+  return(mosaic)
+}
+
+```
+
+```{r Process Data in Batches and Save Mosaics}
+# Divide the data into batches
+batch_size <- 1000  # Adjust the batch size as needed
+num_batches <- ceiling(nrow(globe_cleaned) / batch_size)
+
+# Loop through each batch
+foreach(batch = 1:num_batches, .packages = c("imager")) %dopar% {
+  start_index <- (batch - 1) * batch_size + 1
+  end_index <- min(batch * batch_size, nrow(globe_cleaned))
+  
+  # Extract the subset for the current batch
+  batch_data <- globe_cleaned[start_index:end_index, ]
+  
+  # Create and save mosaics for each row in the batch
+  for (i in 1:nrow(batch_data)) {
+    image_urls <- as.character(batch_data[i, image_url_columns])
+    mosaic <- create_mosaic(image_urls)
+    
+    # If mosaic creation was successful, save the image
+    if (!is.null(mosaic)) {
+      save_path <- paste0("mosaic_", start_index + i - 1, ".png")
+      save.image(mosaic, save_path)
+    }
+  }
+}
+
+# Stop the parallel backend
+stopCluster(cl)
+
+```
+
+```{r creatning new mosaic folder}
+# Create a new folder named "mosaic_images" in your analysis directory
+dir.create("mosaic_images", showWarnings = FALSE)
+
+```
+
+```{r move mosaic files to new folder}
+# Get a list of all mosaic image files in the current directory
+mosaic_files <- list.files(pattern = "mosaic_.*\\.png")
+
+# Move each file to the "mosaic_images" folder
+for (file in mosaic_files) {
+  file.rename(file, file.path("mosaic_images", file))
+}
+
+print("All mosaic images have been moved to the 'mosaic_images' folder.")
+
+```
