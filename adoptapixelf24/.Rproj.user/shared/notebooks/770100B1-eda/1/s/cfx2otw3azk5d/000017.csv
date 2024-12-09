@@ -1,5 +1,0 @@
-"0","globe_c <- globe %>% "
-"0","  select(organization_id, org_name, site_id, site_name, latitude, longitude, elevation, measured_on, landcover_id, data_source, measured_at, muc_code, muc_description, north_photo_url, east_photo_url, south_photo_url, west_photo_url, upward_photo_url, downward_photo_url, measure_lat, measure_long, measure_elev, loc_method, loc_accuracy) %>% "
-"0","  filter(if_all(everything(), ~ !is.na(.)))"
-"0",""
-"0","globe_c"
